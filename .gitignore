@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+orchestrator.yaml
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

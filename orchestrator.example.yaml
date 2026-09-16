@@ -1,0 +1,64 @@
+# Copy to orchestrator.yaml (gitignored) and fill in the placeholders.
+# Secrets never live here — see .env.example for the credential refs.
+version: 1
+
+defaults:
+  concurrency:
+    global: 3
+    perProject: 1
+  agents:
+    DEV-BE: { model: opus, budget: { maxUsd: 6.00, maxTurns: 120, wallClockMinutes: 30 } }
+    DEV-FE: { model: opus, budget: { maxUsd: 6.00, maxTurns: 120, wallClockMinutes: 30 } }
+    QA: { model: sonnet, budget: { maxUsd: 1.50, maxTurns: 60, wallClockMinutes: 20 } }
+    PM: { model: haiku, budget: { maxUsd: 0.50, maxTurns: 20, wallClockMinutes: 10 } }
+    DEVOPS: { model: sonnet, budget: { maxUsd: 2.00, maxTurns: 60, wallClockMinutes: 20 } }
+  pr:
+    draft: true
+    labels: [ai-generated]
+
+office:
+  roomsPerRow: 1 # 1 = one floor per project, stacked
+
+projects:
+  - id: ai-auto-apply
+    name: AI Auto-Apply
+    color: '#3b82f6'
+    repo:
+      path: D:\Repos\GitHub\ai-auto-apply
+      remote: origin
+      baseBranch: main
+      worktreeRoot: D:\aow\ai-auto-apply
+      githubRepo: Rafael3226/ai-auto-apply
+    checks:
+      install: pnpm install --frozen-lockfile --prefer-offline
+      test: pnpm turbo run test
+      required: [test]
+      timeoutMinutes: 15
+    board:
+      provider: trello
+      boardId: '<boardId>'
+      credentials: TRELLO_MAIN
+      botMemberId: "<the bot account's Trello member id>"
+      poll:
+        intervalSeconds: 15
+        reconcileEveryTicks: 40
+      columns:
+        backlog: Backlog
+        ready: Ready for Dev
+        inProgress: In Progress
+        review: In Review
+        blocked: Blocked
+        done: Done
+    agents:
+      DEV-BE: { enabled: true }
+      QA: { enabled: false }
+    routes:
+      - when: { list: Ready for Dev, label: be }
+        agent: DEV-BE
+      - when: { list: In Review }
+        agent: QA
+    writeback:
+      onStart: { move: inProgress, assign: bot, comment: started }
+      onSuccess: { move: review, comment: report }
+      onFailure: { move: blocked, comment: report, addLabel: ai-failed }
+      onBlocked: { move: blocked, comment: report, addLabel: needs-human }
