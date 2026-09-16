@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Orchestrator · Office</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header id="top">
+      <strong>AI Orchestrator</strong>
+      <span id="conn" class="pill">connecting…</span>
+      <span id="stats" class="muted"></span>
+      <span id="diag" class="muted warn"></span>
+    </header>
+    <main>
+      <canvas id="office"></canvas>
+      <aside id="drawer" hidden>
+        <div class="drawer-head">
+          <span id="drawer-title"></span>
+          <button id="drawer-close" aria-label="close">✕</button>
+        </div>
+        <div id="drawer-meta" class="muted"></div>
+        <pre id="drawer-log"></pre>
+      </aside>
+    </main>
+    <footer id="bottom" class="muted">
+      <span id="recent"></span>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

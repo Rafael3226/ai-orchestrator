@@ -49,5 +49,9 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: ['web/src/**/*.ts'],
+    languageOptions: { globals: { ...globals.browser } },
+  },
   prettier,
 );

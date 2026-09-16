@@ -1,36 +1,78 @@
+import { resolve } from 'node:path';
+
+import { BoardStore } from '../board/board.store.js';
 import { loadConfig } from '../config/config.loader.js';
 import { loadOrchestratorEnv } from '../config/env.js';
 import { SqliteStore } from '../db/sqlite.store.js';
 import { LocalDriver } from '../exec/local.driver.js';
 import { Orchestrator, type OrchestratorLogger } from '../scheduler/orchestrator.js';
+import { OfficeServer } from '../server/http.server.js';
 
-export async function startDaemon(): Promise<number> {
-  const env = loadOrchestratorEnv();
-  const loaded = loadConfig(env.ORCHESTRATOR_CONFIG);
-  for (const d of loaded.diagnostics) console.warn(`⚠ config: ${d.projectId ?? '-'}: ${d.message}`);
+const stamp = () => new Date().toISOString().slice(11, 19);
+const logger: OrchestratorLogger = {
+  info: (m) => console.log(`[${stamp()}] ${m}`),
+  warn: (m) => console.warn(`[${stamp()}] ⚠ ${m}`),
+  error: (m) => console.error(`[${stamp()}] ✖ ${m}`),
+};
 
-  const stamp = () => new Date().toISOString().slice(11, 19);
-  const log: OrchestratorLogger = {
-    info: (m) => console.log(`[${stamp()}] ${m}`),
-    warn: (m) => console.warn(`[${stamp()}] ⚠ ${m}`),
-    error: (m) => console.error(`[${stamp()}] ✖ ${m}`),
-  };
-
-  const store = new SqliteStore(env.ORCHESTRATOR_DB);
-  const orchestrator = new Orchestrator(loaded, store, new LocalDriver(), log);
-  await orchestrator.start();
-
-  return new Promise<number>((resolve) => {
+function waitForSignal(onStop: () => Promise<void>): Promise<number> {
+  return new Promise<number>((resolvePromise) => {
     let stopping = false;
     const shutdown = async (signal: string) => {
       if (stopping) return;
       stopping = true;
-      log.info(`${signal} received`);
-      await orchestrator.stop();
-      store.close();
-      resolve(0);
+      logger.info(`${signal} received`);
+      await onStop();
+      resolvePromise(0);
     };
     process.on('SIGINT', () => void shutdown('SIGINT'));
     process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  });
+}
+
+/** `start`: daemon + office server. */
+export async function startDaemon(opts: { noServer?: boolean } = {}): Promise<number> {
+  const env = loadOrchestratorEnv();
+  const loaded = loadConfig(env.ORCHESTRATOR_CONFIG);
+  for (const d of loaded.diagnostics) logger.warn(`config: ${d.projectId ?? '-'}: ${d.message}`);
+
+  const store = new SqliteStore(env.ORCHESTRATOR_DB);
+  const boardStore = new BoardStore(store);
+  const orchestrator = new Orchestrator(loaded, store, new LocalDriver(), logger);
+  const server = opts.noServer
+    ? null
+    : new OfficeServer(loaded, store, boardStore, {
+        host: env.ORCHESTRATOR_HOST,
+        port: env.ORCHESTRATOR_PORT,
+        webDist: resolve('web/dist'),
+        log: logger.info,
+      });
+
+  await orchestrator.start();
+  if (server) await server.start();
+
+  return waitForSignal(async () => {
+    await orchestrator.stop();
+    if (server) await server.stop();
+    store.close();
+  });
+}
+
+/** `serve`: office server only, over an existing database. No polling, no agents. */
+export async function serveOnly(): Promise<number> {
+  const env = loadOrchestratorEnv();
+  const loaded = loadConfig(env.ORCHESTRATOR_CONFIG);
+  const store = new SqliteStore(env.ORCHESTRATOR_DB);
+  const boardStore = new BoardStore(store);
+  const server = new OfficeServer(loaded, store, boardStore, {
+    host: env.ORCHESTRATOR_HOST,
+    port: env.ORCHESTRATOR_PORT,
+    webDist: resolve('web/dist'),
+    log: logger.info,
+  });
+  await server.start();
+  return waitForSignal(async () => {
+    await server.stop();
+    store.close();
   });
 }

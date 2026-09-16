@@ -7,7 +7,7 @@ import { describeBoard, initBoard, listBoards, showStatus } from './cli/board.co
 import { runDoctor } from './cli/doctor.js';
 import { runTask } from './cli/run-task.js';
 import { runSmoke } from './cli/smoke.js';
-import { startDaemon } from './cli/start.js';
+import { serveOnly, startDaemon } from './cli/start.js';
 import { ROLES } from './config/config.schema.js';
 import { loadDotEnv } from './config/load-env.js';
 
@@ -20,9 +20,17 @@ const program = new Command()
 
 program
   .command('start')
-  .description('Run the daemon: poll boards, dispatch agents, write back results')
+  .description('Run the daemon: poll boards, dispatch agents, write back results, serve the office')
+  .option('--no-server', 'do not start the office web server')
+  .action(async (o: { server: boolean }) => {
+    process.exitCode = await startDaemon({ noServer: !o.server });
+  });
+
+program
+  .command('serve')
+  .description('Serve the office UI over the existing database without polling or running agents')
   .action(async () => {
-    process.exitCode = await startDaemon();
+    process.exitCode = await serveOnly();
   });
 
 program
