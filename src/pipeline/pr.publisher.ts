@@ -15,11 +15,14 @@ export interface PrInput {
   readonly labels: readonly string[];
 }
 
+/** gh.exe is a real executable, so Windows resolves it from PATH without a shell. */
+const GH = 'gh';
+
 /** Idempotent: finds an existing open PR for the branch before creating one. */
 export class PrPublisher {
   async findExisting(input: Pick<PrInput, 'cwd' | 'githubRepo' | 'head'>): Promise<string | null> {
     const r = await runCommand(
-      'gh',
+      GH,
       [
         'pr',
         'list',
@@ -37,7 +40,6 @@ export class PrPublisher {
       {
         cwd: input.cwd,
         timeoutMs: 60_000,
-        shell: process.platform === 'win32',
         env: { GH_PROMPT_DISABLED: '1' },
       },
     );
@@ -76,10 +78,10 @@ export class PrPublisher {
     if (input.draft) args.push('--draft');
     for (const l of input.labels) args.push('--label', l);
 
-    const r = await runCommand('gh', args, {
+    // Never through a shell: on Windows that re-splits the quoted title on spaces.
+    const r = await runCommand(GH, args, {
       cwd: input.cwd,
       timeoutMs: 120_000,
-      shell: process.platform === 'win32',
       env: { GH_PROMPT_DISABLED: '1' },
     });
     if (r.exitCode !== 0) {

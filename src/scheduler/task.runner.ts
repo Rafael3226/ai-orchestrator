@@ -126,6 +126,10 @@ export async function executeTask(
         model: agent.model,
         resumedFrom: sessionId,
       });
+      // Point the task at its run immediately so the office can follow live events.
+      store.db
+        .prepare('UPDATE tasks SET current_run_id = ?, attempts = ? WHERE id = ?')
+        .run(runId, attempt, taskId);
       log(
         `[${task.card_short_id}] attempt ${attempt}: ${role} (${agent.model}) — $${agent.budget.maxUsd}, ${agent.budget.maxTurns} turns`,
       );

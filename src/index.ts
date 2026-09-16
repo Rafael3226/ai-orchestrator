@@ -5,6 +5,7 @@ import { Command } from 'commander';
 
 import { describeBoard, initBoard, listBoards, showStatus } from './cli/board.commands.js';
 import { runDoctor } from './cli/doctor.js';
+import { republish } from './cli/republish.js';
 import { runTask } from './cli/run-task.js';
 import { runSmoke } from './cli/smoke.js';
 import { serveOnly, startDaemon } from './cli/start.js';
@@ -38,6 +39,15 @@ program
   .description('Show queue, cursors and outbox from the local database')
   .action(async () => {
     process.exitCode = await showStatus();
+  });
+
+program
+  .command('republish <taskId>')
+  .description(
+    'Finish a task whose publish step failed after the push: open the PR, flip to review, write back',
+  )
+  .action(async (taskId: string) => {
+    process.exitCode = await republish(taskId);
   });
 
 program
