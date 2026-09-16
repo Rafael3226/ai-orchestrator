@@ -3,9 +3,11 @@ import { readFileSync } from 'node:fs';
 
 import { Command } from 'commander';
 
+import { describeBoard, initBoard, listBoards, showStatus } from './cli/board.commands.js';
 import { runDoctor } from './cli/doctor.js';
 import { runTask } from './cli/run-task.js';
 import { runSmoke } from './cli/smoke.js';
+import { startDaemon } from './cli/start.js';
 import { ROLES } from './config/config.schema.js';
 import { loadDotEnv } from './config/load-env.js';
 
@@ -17,10 +19,48 @@ const program = new Command()
   .version('0.1.0');
 
 program
+  .command('start')
+  .description('Run the daemon: poll boards, dispatch agents, write back results')
+  .action(async () => {
+    process.exitCode = await startDaemon();
+  });
+
+program
+  .command('status')
+  .description('Show queue, cursors and outbox from the local database')
+  .action(async () => {
+    process.exitCode = await showStatus();
+  });
+
+program
   .command('doctor')
   .description('Check toolchain, credentials, config and target repos')
   .action(() => {
     process.exitCode = runDoctor();
+  });
+
+program
+  .command('boards')
+  .description('List Trello boards visible to a credential ref (and the bot member id)')
+  .option('-c, --cred <ref>', 'credential ref, e.g. TRELLO_MAIN', 'TRELLO_MAIN')
+  .action(async (o: { cred: string }) => {
+    process.exitCode = await listBoards(o.cred);
+  });
+
+program
+  .command('lists <boardId>')
+  .description('Show a board’s columns, labels and members with their ids')
+  .option('-c, --cred <ref>', 'credential ref', 'TRELLO_MAIN')
+  .action(async (boardId: string, o: { cred: string }) => {
+    process.exitCode = await describeBoard(boardId, o.cred);
+  });
+
+program
+  .command('init-board <name>')
+  .description('Create a Trello board with the standard columns and labels (writes to Trello)')
+  .option('-c, --cred <ref>', 'credential ref', 'TRELLO_MAIN')
+  .action(async (name: string, o: { cred: string }) => {
+    process.exitCode = await initBoard(name, o.cred);
   });
 
 program

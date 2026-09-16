@@ -27,7 +27,8 @@ const TRANSITIONS: Readonly<Record<TaskState, readonly TaskState[]>> = {
   queued: ['claimed', 'cancelled'],
   claimed: ['preparing', 'queued', 'failed', 'cancelled'],
   preparing: ['running', 'queued', 'failed', 'cancelled'],
-  running: ['verifying', 'blocked', 'failed', 'queued', 'cancelled'],
+  // running -> needs_human: the agent finished without propose_summary (nothing to publish)
+  running: ['verifying', 'blocked', 'needs_human', 'failed', 'queued', 'cancelled'],
   // verifying -> running is the one retry (same session, test output appended)
   verifying: ['publishing', 'running', 'needs_human', 'failed', 'cancelled'],
   publishing: ['review', 'needs_human', 'failed'],
