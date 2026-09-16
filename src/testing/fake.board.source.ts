@@ -204,7 +204,8 @@ export class FakeBoardSource implements BoardSource {
       synthetic: false,
     });
   }
+  /** Real wall clock (plus a ms per event for strict ordering) so echo detection behaves as in production. */
   private now(): string {
-    return new Date(Date.UTC(2026, 0, 1) + this.seq * 1000).toISOString();
+    return new Date(Date.now() + this.seq).toISOString();
   }
 }

@@ -139,6 +139,15 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     expect((await sync.tick()).dispatched.map((x) => x.role)).toEqual(['QA']);
   });
 
+  it('treats the bot account as a human outside the echo window (shared-account setup)', async () => {
+    // The operator's own token is the "bot": their manual moves must still dispatch.
+    board.humanId = board.botId;
+    const c = board.addCard('20', 'Moved by the same account', 'Backlog', { labels: ['be'] });
+    board.humanMove(c.id, 'Ready for Dev');
+    const r = await sync.tick();
+    expect(r.dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+  });
+
   it('writeback comment is idempotent on redelivery', async () => {
     const c = board.addCard('13', 'Twice', 'Ready for Dev', { labels: ['be'] });
     await sync.tick();

@@ -23,6 +23,8 @@ export interface Dispatch {
 export type RouteDecision =
   { kind: 'dispatch'; dispatch: Dispatch } | { kind: 'skip'; reason: string };
 
+/** A board event this close to one of our writebacks on the same card is its echo. */
+const ECHO_WINDOW_MS = 15_000;
 const CIRCUIT_WINDOW_MS = 60 * 60 * 1000;
 const CIRCUIT_MAX_DISPATCHES = 3;
 
@@ -37,19 +39,21 @@ export class BoardRouter {
   constructor(
     private readonly project: ProjectConfig,
     private readonly boardStore: BoardStore,
-    /** Recently written cards (cardId -> until epoch ms). Guard layer 2. */
-    private readonly recentWriteback: Map<string, number> = new Map(),
+    /** Our recent writeback timestamps per card; events within ECHO_WINDOW_MS of one are echoes. */
+    private readonly recentWriteback: Map<string, number[]> = new Map(),
   ) {}
 
   route(event: BoardEvent, topology: BoardTopology, card: BoardCard | null): RouteDecision {
     const p = this.project;
 
-    if (event.actorMemberId && event.actorMemberId === p.board.botMemberId) {
-      return { kind: 'skip', reason: 'own writeback' };
-    }
-    const until = this.recentWriteback.get(event.cardId);
-    if (until && until > Date.now() && !event.synthetic) {
-      return { kind: 'skip', reason: 'within writeback quiet window' };
+    // Loop guard layer 1+2. The bot member is often the operator's own account (one Trello
+    // token), so a bot-authored event is only an echo when it OCCURRED within a few seconds of
+    // our own writeback to that card — compared on the event's timestamp, not on poll time, so
+    // the poll interval does not matter. Outside that window the same account is a human.
+    if (!event.synthetic && this.isEcho(event.cardId, event.occurredAt)) {
+      if (!event.actorMemberId || event.actorMemberId === p.board.botMemberId) {
+        return { kind: 'skip', reason: 'own writeback' };
+      }
     }
     if (
       event.kind === 'card.updated' ||
@@ -113,9 +117,22 @@ export class BoardRouter {
     return { kind: 'skip', reason: 'no route matched' };
   }
 
-  /** Called by writeback so the next poll ignores the echo of our own action. */
-  noteWriteback(cardId: string, quietMs = 5000): void {
-    this.recentWriteback.set(cardId, Date.now() + quietMs);
+  /** Called by writeback so the echo of our own action (whenever it is polled) is ignored. */
+  noteWriteback(cardId: string, at: number = Date.now()): void {
+    const list = this.recentWriteback.get(cardId) ?? [];
+    list.push(at);
+    // Keep the map bounded: anything older than the echo window is useless.
+    const cutoff = Date.now() - ECHO_WINDOW_MS * 4;
+    this.recentWriteback.set(
+      cardId,
+      list.filter((t) => t > cutoff),
+    );
+  }
+
+  private isEcho(cardId: string, occurredAt: string): boolean {
+    const t = Date.parse(occurredAt);
+    if (Number.isNaN(t)) return false;
+    return (this.recentWriteback.get(cardId) ?? []).some((w) => Math.abs(t - w) <= ECHO_WINDOW_MS);
   }
 }
 
