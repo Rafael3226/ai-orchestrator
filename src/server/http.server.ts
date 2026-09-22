@@ -126,13 +126,21 @@ export class OfficeServer {
     });
 
     if (this.opts.webDist && existsSync(this.opts.webDist)) {
+      // Wildcard serving resolves files at request time, so a `pnpm web:build` with new
+      // asset hashes is picked up without restarting the daemon.
       void app.register(fastifyStatic, {
         root: resolve(this.opts.webDist),
         prefix: '/',
-        wildcard: false,
+        wildcard: true,
       });
       app.setNotFoundHandler((req, reply) => {
-        if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'not found' });
+        const path = req.url.split('?')[0] ?? '';
+        if (path.startsWith('/api/')) return reply.code(404).send({ error: 'not found' });
+        // A missing asset must 404, never fall back to index.html (browsers reject a
+        // text/html response for a module script).
+        if (path.startsWith('/assets/') || /\.[a-z0-9]+$/i.test(path)) {
+          return reply.code(404).send({ error: 'not found' });
+        }
         return reply.sendFile('index.html');
       });
     } else {
