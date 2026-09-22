@@ -20,6 +20,8 @@ const GH = 'gh';
 
 /** Idempotent: finds an existing open PR for the branch before creating one. */
 export class PrPublisher {
+  constructor(private readonly warn: (message: string) => void = () => {}) {}
+
   async findExisting(input: Pick<PrInput, 'cwd' | 'githubRepo' | 'head'>): Promise<string | null> {
     const r = await runCommand(
       GH,
@@ -85,8 +87,13 @@ export class PrPublisher {
       env: { GH_PROMPT_DISABLED: '1' },
     });
     if (r.exitCode !== 0) {
-      // Labels that don't exist on the repo make gh fail; retry without them once.
+      // Labels that don't exist on the repo make gh fail; retry without them once,
+      // and say so — a silently unlabelled PR looked like a config that never applied.
       if (input.labels.length && /label/i.test(r.output)) {
+        this.warn(
+          `PR opened without labels [${input.labels.join(', ')}]: gh rejected them — ` +
+            `create them on ${input.githubRepo} (\`orchestrator doctor\` checks this)`,
+        );
         return this.createDraft({ ...input, labels: [] });
       }
       throw new Error(`gh pr create failed:\n${r.output.slice(-3000)}`);

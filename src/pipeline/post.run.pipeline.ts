@@ -39,8 +39,8 @@ export interface PublishOutput {
  */
 export async function publish(input: PublishInput): Promise<PublishOutput> {
   const git = new GitPublisher();
-  const pr = new PrPublisher();
   const { project, workspace, log } = input;
+  const pr = new PrPublisher((m) => log(`⚠ ${m}`));
 
   log('stage + scan diff');
   const diff = await git.stageAndInspect(workspace.path, workspace.copiedIncludes);
