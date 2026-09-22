@@ -136,12 +136,58 @@ const HARD_DENY: readonly { re: RegExp; why: string }[] = [
   { re: /\beval\b/i, why: 'eval' },
 ];
 
-/** Split on ; && || | and newlines so every segment gets its head checked. */
+/**
+ * Split on ; && || | and newlines so every segment gets its head checked.
+ * Quote-aware: a `|` or `;` inside "..." or '...' (a grep alternation, a sed
+ * script) is data, not a pipe — splitting there made `grep -E "a|Tests"` look
+ * like a `Tests"` command and denied harmless greps.
+ */
 export function segments(command: string): string[] {
-  return command
-    .split(/\r?\n|;|&&|\|\||\|/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const out: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote) {
+      cur += ch;
+      if (ch === '\\' && quote === '"' && i + 1 < command.length) cur += command[++i]!;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      cur += ch + command[++i]!;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === '\n' || ch === ';' || ch === '|' || ch === '&') {
+      const two = command.slice(i, i + 2);
+      if (two === '||' || two === '&&') i++;
+      else if (ch === '&') {
+        // A lone `&` is a background job or a redirect target (2>&1); not a separator.
+        cur += ch;
+        continue;
+      }
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.replace(/\r$/, '').trim()).filter(Boolean);
+}
+
+/**
+ * Git Bash (MSYS) spells `D:\aow\x` as `/d/aow/x`. Node resolves that against
+ * the current drive, so a `cd` into the agent's own worktree looked foreign.
+ */
+export function fromMsysPath(p: string): string {
+  const m = /^\/([A-Za-z])(\/.*)?$/.exec(p);
+  return m ? `${m[1]!.toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : p;
 }
 
 function headOf(segment: string): { head: string; tokens: string[] } {
@@ -177,7 +223,8 @@ export function checkBash(root: string, command: string): GuardResult {
       }
     }
     if (head === 'cd') {
-      const target = tokens[1]?.replace(/^["']|["']$/g, '');
+      let target = tokens[1]?.replace(/^["']|["']$/g, '');
+      if (target && process.platform === 'win32') target = fromMsysPath(target);
       if (target && !isInside(root, resolve(root, target))) {
         return { ok: false, reason: 'cd outside worktree' };
       }

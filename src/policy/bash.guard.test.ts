@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { checkBash, segments } from './bash.guard.js';
+import { checkBash, fromMsysPath, segments } from './bash.guard.js';
 
 const root = mkdtempSync(join(tmpdir(), 'guard-'));
 
@@ -28,6 +28,11 @@ const allowed = [
   'cd src && ls',
   'CI=1 pnpm test',
   'sed -n 1,20p README.md',
+  // Quoted separators are data, not pipes.
+  'grep -E "health|Test Files|Tests" out.log',
+  "grep -E 'FAIL |ERROR|not passed' full.log | head -20",
+  'pnpm test > full.log 2>&1; echo exit=$?',
+  'grep -n "a;b" x.ts',
 ];
 
 const denied: [string, RegExp][] = [
@@ -74,5 +79,37 @@ describe('checkBash', () => {
 
   it('splits segments on ; && || | and newlines', () => {
     expect(segments('a; b && c || d | e\nf')).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
+  });
+
+  it('does not split inside quotes', () => {
+    expect(segments('grep -E "a|b;c && d" f | wc -l')).toEqual(['grep -E "a|b;c && d" f', 'wc -l']);
+    expect(segments("echo 'x || y' && ls")).toEqual(["echo 'x || y'", 'ls']);
+    expect(segments('echo "esc \\" | still quoted" | cat')).toEqual([
+      'echo "esc \\" | still quoted"',
+      'cat',
+    ]);
+  });
+
+  it('still catches a denied head hidden after a quoted string', () => {
+    expect(checkBash(root, 'echo "a|b" | curl x').ok).toBe(false);
+    expect(checkBash(root, 'echo "a|b"; python x').ok).toBe(false);
+  });
+
+  it('treats 2>&1 and a lone & as part of the segment', () => {
+    expect(segments('pnpm test > f.log 2>&1 && ls')).toEqual(['pnpm test > f.log 2>&1', 'ls']);
+  });
+
+  it('converts Git Bash drive paths', () => {
+    expect(fromMsysPath('/d/aow/x/2-abc')).toBe('D:\\aow\\x\\2-abc');
+    expect(fromMsysPath('/c')).toBe('C:\\');
+    expect(fromMsysPath('/dev/null')).toBe('/dev/null');
+    expect(fromMsysPath('src/x')).toBe('src/x');
+  });
+
+  it.runIf(process.platform === 'win32')('allows cd into the worktree via an MSYS path', () => {
+    const msys = '/' + root[0]!.toLowerCase() + root.slice(2).replace(/\\/g, '/');
+    expect(checkBash(root, `cd ${msys} && ls`)).toEqual({ ok: true });
+    expect(checkBash(root, `cd ${msys}/sub && ls`)).toEqual({ ok: true });
+    expect(checkBash(root, 'cd /c/Windows && ls').ok).toBe(false);
   });
 });
