@@ -7,7 +7,8 @@ opens a draft PR and reports back on the card. A read-only 2D office shows
 who is working on what.
 
 > **Status:** phases 0–4 built (execution spine, Trello integration, office
-> UI). Milestone 1 — a real card to a real draft PR — awaits a live run. See
+> UI). Milestone 1 is met: two Trello cards have gone from **Ready for Dev**
+> to a reviewed draft PR unattended. Phase 5 (breadth) is next. See
 > `docs/roadmap.md`.
 
 ## Quick start

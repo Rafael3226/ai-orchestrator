@@ -9,5 +9,12 @@
 | 4     | Office UI: Fastify + SSE + Vite canvas                                      | done   |
 | 5     | Breadth: remaining roles, Docker driver, webhooks, ADO / Jira               |        |
 
+**Milestone 1 — a real card to a real draft PR — is met.** Two `be` cards on the
+live board dispatched DEV-BE, verified, pushed and opened draft PRs without a
+hand on the wheel: a slugify utility and a Redis readiness check, both against
+`ai-auto-apply`. The fixes the two runs turned up (quote-aware bash guard, MSYS
+`cd` paths, label rejection surfaced instead of swallowed, office asset serving
+and canvas layout) are in.
+
 Design decisions and their rationale live in the plan that produced this repo;
 the short version of each is recorded in `docs/decisions.md` as it lands.
