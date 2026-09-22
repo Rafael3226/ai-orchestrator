@@ -160,8 +160,41 @@ function configChecks(env: OrchestratorEnv): Check[] {
         });
       }
     }
+    out.push(prLabelsCheck(p.repo.githubRepo, p.pr.labels));
   }
   return out;
+}
+
+/**
+ * `gh pr create --label` fails for a label the repo does not have, and the
+ * publisher then opens the PR unlabelled. Catch that here, before a live run.
+ */
+function prLabelsCheck(githubRepo: string, wanted: readonly string[]): Check {
+  const name = `  pr labels ${githubRepo}`;
+  if (wanted.length === 0) return { name, status: 'ok', detail: 'none configured' };
+  let existing: string[];
+  try {
+    const raw = run('gh', [
+      'label',
+      'list',
+      '--repo',
+      githubRepo,
+      '--json',
+      'name',
+      '--limit',
+      '200',
+    ]);
+    existing = (JSON.parse(raw || '[]') as { name: string }[]).map((l) => l.name.toLowerCase());
+  } catch (e) {
+    return { name, status: 'warn', detail: `could not list labels (${String(e).split('\n')[0]})` };
+  }
+  const missing = wanted.filter((l) => !existing.includes(l.toLowerCase()));
+  if (missing.length === 0) return { name, status: 'ok', detail: wanted.join(', ') };
+  return {
+    name,
+    status: 'warn',
+    detail: `missing on the repo: ${missing.join(', ')} — create them with \`gh label create <name> --repo ${githubRepo}\` or PRs will be opened unlabelled`,
+  };
 }
 
 export function runDoctor(): number {
