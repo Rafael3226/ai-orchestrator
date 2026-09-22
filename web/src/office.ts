@@ -67,7 +67,8 @@ export class Office {
   }
 
   private bind(): void {
-    new ResizeObserver(() => this.resize()).observe(this.canvas.parentElement ?? this.canvas);
+    // Observe the canvas itself: opening the drawer resizes the canvas but not its parent.
+    new ResizeObserver(() => this.resize()).observe(this.canvas);
     this.canvas.addEventListener(
       'wheel',
       (e) => {
