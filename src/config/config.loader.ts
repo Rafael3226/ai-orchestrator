@@ -17,7 +17,9 @@ import {
   type Role,
   ROLES,
   type RouteConfig,
+  type WritebackStep,
 } from './config.schema.js';
+import type { CredentialKind, CredentialUse } from './credentials.js';
 
 /** Hard-coded floor so a project can omit `defaults.agents` entirely. */
 const BUILTIN_AGENT_DEFAULTS: Record<Role, AgentSettings> = {
@@ -73,8 +75,8 @@ export interface LoadedConfig {
   readonly hash: string;
   readonly config: OrchestratorConfig;
   readonly diagnostics: readonly ConfigDiagnostic[];
-  /** credential ref -> ids of the projects that use it */
-  readonly credentialRefs: ReadonlyMap<string, readonly string[]>;
+  /** credential ref -> its provider and the ids of the projects that use it */
+  readonly credentialRefs: ReadonlyMap<string, CredentialUse>;
   project(id: string): ProjectConfig;
 }
 
@@ -110,11 +112,10 @@ export function loadConfigFromString(yamlText: string, sourcePath: string): Load
     throw new Error(`Invalid config ${sourcePath}. See the errors above.`);
   }
 
-  const credentialRefs = new Map<string, string[]>();
-  for (const p of projects) {
-    const list = credentialRefs.get(p.board.credentials) ?? [];
-    list.push(p.id);
-    credentialRefs.set(p.board.credentials, list);
+  const credentialRefs = collectCredentialRefs(projects, errors);
+  if (errors.length) {
+    console.error(`❌ Invalid config ${sourcePath}:\n` + errors.map((e) => `  ✖ ${e}`).join('\n'));
+    throw new Error(`Invalid config ${sourcePath}. See the errors above.`);
   }
 
   const config = deepFreeze<OrchestratorConfig>({ ...parsed.data, projects });
@@ -241,6 +242,8 @@ function normalizeProject(
     }
   }
 
+  checkLabelNames(p, errors);
+
   if (moves && !p.board.botMemberId) {
     errors.push(
       `projects.${p.id}.board.botMemberId is required when writeback moves cards (loop guard)`,
@@ -250,6 +253,76 @@ function normalizeProject(
   // Per-project `pr` is a partial overlay; drop undefined so it cannot erase a default.
   const pr = { ...root.defaults.pr, ...stripUndefined(p.pr ?? {}) };
   return { ...p, agents, routes, pr };
+}
+
+/**
+ * Board and repo-host refs share one namespace: an Azure DevOps project can use
+ * a single PAT for its work items and its repository. A ref that two providers
+ * both claim would resolve to the wrong env vars, so it is an error.
+ */
+function collectCredentialRefs(
+  projects: readonly ProjectConfig[],
+  errors: string[],
+): Map<string, CredentialUse> {
+  const out = new Map<string, { kind: CredentialKind; projects: string[] }>();
+  const use = (ref: string, kind: CredentialKind, projectId: string, where: string): void => {
+    const cur = out.get(ref);
+    if (!cur) {
+      out.set(ref, { kind, projects: [projectId] });
+      return;
+    }
+    if (cur.kind !== kind) {
+      errors.push(
+        `projects.${projectId}.${where}: credential ref ${ref} is already a ${cur.kind} ` +
+          `credential (${cur.projects.join(', ')}); use a separate ref for ${kind}`,
+      );
+      return;
+    }
+    if (!cur.projects.includes(projectId)) cur.projects.push(projectId);
+  };
+  for (const p of projects) {
+    use(p.board.credentials, p.board.provider, p.id, 'board.credentials');
+    if (p.repo.host.provider === 'azure-devops') {
+      use(p.repo.host.credentials, 'azure-devops', p.id, 'repo.host.credentials');
+    }
+  }
+  return out;
+}
+
+/**
+ * Freeform labels are created on first use, so a name the provider cannot
+ * store must fail at load rather than in the outbox. Jira labels cannot hold
+ * spaces; Azure DevOps tags are separated by `;`.
+ */
+function checkLabelNames(p: ProjectConfigRaw, errors: string[]): void {
+  const bad =
+    p.board.provider === 'jira'
+      ? { re: /\s/, why: 'Jira labels cannot contain spaces' }
+      : p.board.provider === 'azure-devops'
+        ? { re: /[;,]/, why: 'Azure DevOps tags cannot contain ";" or ","' }
+        : null;
+  if (!bad) return;
+  const steps: [string, WritebackStep | undefined][] = [];
+  for (const [name, step] of Object.entries(p.writeback)) steps.push([`writeback.${name}`, step]);
+  for (const role of ROLES) {
+    for (const [name, step] of Object.entries(p.agents[role]?.writeback ?? {})) {
+      steps.push([`agents.${role}.writeback.${name}`, step]);
+    }
+  }
+  const names = (v: string | string[] | undefined): string[] =>
+    v === undefined ? [] : Array.isArray(v) ? v : [v];
+  for (const [where, step] of steps) {
+    for (const label of [...names(step?.addLabel), ...names(step?.removeLabel)]) {
+      if (bad.re.test(label)) errors.push(`projects.${p.id}.${where}: "${label}" — ${bad.why}`);
+    }
+  }
+  for (const label of [...names(p.pr?.labels)]) {
+    if (p.repo.host.provider === 'azure-devops' && /[;,]/.test(label)) {
+      errors.push(
+        `projects.${p.id}.pr.labels: "${label}" — Azure DevOps labels cannot contain ";"`,
+      );
+    }
+  }
 }
 
 type AgentDefaults = NonNullable<OrchestratorConfigRaw['defaults']['agents'][Role]>;

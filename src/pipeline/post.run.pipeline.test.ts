@@ -12,7 +12,7 @@ import { ROLE_DELIVERY, type DeliveryPolicy } from '../policy/delivery.policy.js
 import type { WorkspaceHandle } from '../workspace/worktree.manager.js';
 
 import { PublishAbort, publish } from './post.run.pipeline.js';
-import type { PrPublisher } from './pr.publisher.js';
+import type { PrHost } from './pr.host.js';
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -66,7 +66,9 @@ const emptyExec = (): ExecResult => ({
 /** `gh` is never invoked in the suite; the PR step is a seam. */
 const fakePr = () => {
   const createDraft = vi.fn().mockResolvedValue('https://github.com/me/demo/pull/7');
-  return { createDraft } as unknown as PrPublisher & { createDraft: ReturnType<typeof vi.fn> };
+  return { provider: 'github', repoName: 'me/demo', createDraft } as unknown as PrHost & {
+    createDraft: ReturnType<typeof vi.fn>;
+  };
 };
 
 const run = (delivery: DeliveryPolicy, pr = fakePr()) =>

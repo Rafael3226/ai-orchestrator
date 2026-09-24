@@ -9,6 +9,7 @@ import { HostExecutor, type WorkspaceExecutor } from '../exec/workspace.executor
 import { KeyedMutex } from '../process/async.mutex.js';
 
 import { renderBranchName, withCollisionSuffix } from './branch.namer.js';
+import { gitAuthEnv } from './git.auth.js';
 import { GitCli } from './git.cli.js';
 import { copyIncludes } from './include.copier.js';
 
@@ -97,7 +98,8 @@ export class WorktreeManager {
 
       const { remote, baseBranch } = input.project.repo;
       log(`fetch ${remote}/${baseBranch}`);
-      await this.git.fetch(repo, remote, baseBranch);
+      const auth = gitAuthEnv(input.project);
+      await this.git.fetch(repo, remote, baseBranch, auth);
       const baseSha = await this.git.revParse(repo, `${remote}/${baseBranch}`);
 
       const base = renderBranchName({
@@ -110,7 +112,7 @@ export class WorktreeManager {
       for (const candidate of [base, ...Array.from({ length: 10 }, (_, i) => `${base}-${i + 2}`)]) {
         if (
           (await this.git.refExists(repo, `refs/heads/${candidate}`)) ||
-          (await this.git.remoteBranchExists(repo, remote, candidate))
+          (await this.git.remoteBranchExists(repo, remote, candidate, auth))
         ) {
           taken.add(candidate);
         } else break;

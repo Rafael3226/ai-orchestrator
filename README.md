@@ -1,10 +1,11 @@
 # AI Orchestrator
 
-A board-driven AI dev team. Cards on a Trello board dispatch role agents
-(DEV-FE, DEV-BE, QA, PM, DEVOPS); each agent runs Claude Code headlessly in
-its own git worktree, the orchestrator verifies the result, pushes a branch,
-opens a draft PR and reports back on the card. A read-only 2D office shows
-who is working on what.
+A board-driven AI dev team. Cards on a Trello, Azure DevOps or Jira board
+dispatch role agents (DEV-FE, DEV-BE, QA, PM, DEVOPS); each agent runs Claude
+Code headlessly in its own git worktree, the orchestrator verifies the result,
+pushes a branch, opens a draft PR (GitHub or Azure Repos) and reports back on
+the card. A read-only 2D office shows who is working on what. Setting up each
+board and repo host is in `docs/providers.md`.
 
 > **Status:** phases 0–4 done; phase 5 (all five roles, webhook delivery, the
 > Docker driver) is built and green but not yet live-proven. Milestone 1 is met:
@@ -30,15 +31,15 @@ Move a card with the `be` label into **Ready for Dev** and watch the office.
 
 ## Commands
 
-| Command                                           | What it does                                                                                                       |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `start`                                           | Daemon: poll boards, dispatch agents, write back, serve the office (`--no-server` / `--no-webhook` to skip either) |
-| `serve`                                           | Office UI only, over the existing database                                                                         |
-| `status`                                          | Queue, cursors and outbox from the local database                                                                  |
-| `run-task -p <project> -t <title> -s <spec>`      | One task end to end with no board (`--dry-run` skips push/PR)                                                      |
-| `smoke [--cancel <ms>]`                           | Cheap live check of the Agent SDK driver and the cancel ladder                                                     |
-| `webhooks list\|register\|delete`                 | Manage board-side push registrations (see `docs/webhooks.md`)                                                      |
-| `doctor` · `boards` · `lists <id>` · `init-board` | Setup helpers                                                                                                      |
+| Command                                                      | What it does                                                                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `start`                                                      | Daemon: poll boards, dispatch agents, write back, serve the office (`--no-server` / `--no-webhook` to skip either) |
+| `serve`                                                      | Office UI only, over the existing database                                                                         |
+| `status`                                                     | Queue, cursors and outbox from the local database                                                                  |
+| `run-task -p <project> -t <title> -s <spec>`                 | One task end to end with no board (`--dry-run` skips push/PR)                                                      |
+| `smoke [--cancel <ms>]`                                      | Cheap live check of the Agent SDK driver and the cancel ladder                                                     |
+| `webhooks list\|register\|delete`                            | Manage board-side push registrations (see `docs/webhooks.md`)                                                      |
+| `doctor` · `boards` · `lists <id>` · `whoami` · `init-board` | Setup helpers; `--provider trello\|azure-devops\|jira`, see `docs/providers.md`                                    |
 
 ## How a card becomes a PR
 
@@ -61,21 +62,21 @@ Move a card with the `be` label into **Ready for Dev** and watch the office.
 
 ## Layout
 
-| Path             | Purpose                                                           |
-| ---------------- | ----------------------------------------------------------------- |
-| `src/config/`    | env + YAML loading, zod-validated, frozen, credential refs        |
-| `src/board/`     | `BoardSource` abstraction, Trello client/poller, writeback outbox |
-| `src/router/`    | event → dispatch: arrival detection, dedupe key, loop guard       |
-| `src/db/`        | SQLite store with CAS task transitions                            |
-| `src/exec/`      | `ExecDriver` — runs Claude Code via the Agent SDK                 |
-| `src/policy/`    | PreToolUse guard, bash allowlist, role tool policies, secrets     |
-| `src/mcp/`       | in-process board tools exposed to the agent                       |
-| `src/workspace/` | git worktree lifecycle                                            |
-| `src/pipeline/`  | verify → commit → push → draft PR → report                        |
-| `src/scheduler/` | task lifecycle and the daemon                                     |
-| `src/server/`    | Fastify + SSE state projection                                    |
-| `web/`           | Vite + canvas office client                                       |
-| `docs/`          | roadmap and conventions                                           |
+| Path             | Purpose                                                               |
+| ---------------- | --------------------------------------------------------------------- |
+| `src/config/`    | env + YAML loading, zod-validated, frozen, credential refs            |
+| `src/board/`     | `BoardSource` abstraction; Trello, Azure DevOps, Jira sources; outbox |
+| `src/router/`    | event → dispatch: arrival detection, dedupe key, loop guard           |
+| `src/db/`        | SQLite store with CAS task transitions                                |
+| `src/exec/`      | `ExecDriver` — runs Claude Code via the Agent SDK                     |
+| `src/policy/`    | PreToolUse guard, bash allowlist, role tool policies, secrets         |
+| `src/mcp/`       | in-process board tools exposed to the agent                           |
+| `src/workspace/` | git worktree lifecycle                                                |
+| `src/pipeline/`  | verify → commit → push → draft PR (GitHub, Azure Repos) → report      |
+| `src/scheduler/` | task lifecycle and the daemon                                         |
+| `src/server/`    | Fastify + SSE state projection                                        |
+| `web/`           | Vite + canvas office client                                           |
+| `docs/`          | roadmap and conventions                                               |
 
 ## Conventions
 

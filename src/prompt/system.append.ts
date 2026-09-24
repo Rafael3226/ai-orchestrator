@@ -53,7 +53,8 @@ export function buildSystemAppend(project: ProjectConfig, role: Role): string {
     boardOnly
       ? '  working directory IS the worktree. Read freely inside it.'
       : '  working directory IS the worktree. Edit freely inside it.',
-    '- You have no network access and no GitHub CLI. Path and command guards will DENY any write',
+    '- You have no network access and no GitHub, Azure or Jira CLI. Path and command guards will',
+    '  DENY any write',
     '  outside the worktree, any `git push`/`commit`/`checkout`, and any network tool. If a command',
     '  is denied, do not work around it — call mcp__board__report_blocked if you truly cannot proceed.',
   ];

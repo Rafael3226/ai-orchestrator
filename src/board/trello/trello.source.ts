@@ -1,4 +1,4 @@
-import type { BoardCredential } from '../../config/credentials.js';
+import type { TrelloCredential } from '../../config/credentials.js';
 import {
   BoardError,
   type BoardCapabilities,
@@ -44,12 +44,12 @@ export class TrelloSource implements BoardSource, WebhookRegistrar {
     canRegisterWebhook: true,
   };
   private readonly http: TrelloHttp;
-  private readonly cred: BoardCredential;
+  private readonly cred: TrelloCredential;
   private labelsById = new Map<string, string>();
 
   constructor(
     readonly boardId: string,
-    cred: BoardCredential,
+    cred: TrelloCredential,
     http?: TrelloHttp,
   ) {
     this.http = http ?? new TrelloHttp(cred);
@@ -188,7 +188,7 @@ export class TrelloSource implements BoardSource, WebhookRegistrar {
   // ── bootstrap helpers used by the CLI ─────────────────────────────────
 
   static async listBoards(
-    cred: BoardCredential,
+    cred: TrelloCredential,
   ): Promise<{ id: string; name: string; url: string }[]> {
     const http = new TrelloHttp(cred);
     const boards = await http.get<{ id: string; name: string; url: string; closed: boolean }[]>(
@@ -199,7 +199,7 @@ export class TrelloSource implements BoardSource, WebhookRegistrar {
   }
 
   static async createBoard(
-    cred: BoardCredential,
+    cred: TrelloCredential,
     name: string,
     columns: readonly string[],
   ): Promise<{ id: string; url: string }> {
@@ -216,7 +216,7 @@ export class TrelloSource implements BoardSource, WebhookRegistrar {
   }
 
   static async ensureLabels(
-    cred: BoardCredential,
+    cred: TrelloCredential,
     boardId: string,
     names: readonly string[],
   ): Promise<void> {

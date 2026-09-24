@@ -1,9 +1,9 @@
+import { createBoardSource, isWebhookRegistrar } from '../board/board.factory.js';
 import type { BoardSource, WebhookRegistrar } from '../board/board.source.js';
 import { BoardStore } from '../board/board.store.js';
 import { BoardSync } from '../board/board.sync.js';
 import { WebhookBufferedSource } from '../board/board.webhook-buffer.js';
 import { BoardWriter } from '../board/board.writer.js';
-import { TrelloSource } from '../board/trello/trello.source.js';
 import {
   assertPublicUrl,
   callbackUrlFor,
@@ -35,6 +35,8 @@ export interface OrchestratorLogger {
 interface ProjectRuntime {
   readonly project: ProjectConfig;
   readonly source: BoardSource;
+  /** Under any webhook buffer: the provider itself, for webhook registration. */
+  readonly registrar: WebhookRegistrar | null;
   readonly sync: BoardSync;
   readonly writer: BoardWriter;
   readonly buffer: WebhookBufferedSource | null;
@@ -81,10 +83,10 @@ export class Orchestrator {
      */
     private readonly driver: ExecDriver,
     private readonly log: OrchestratorLogger,
-    private readonly sourceFactory: (p: ProjectConfig, cred: BoardCredential) => BoardSource = (
-      p,
-      c,
-    ) => new TrelloSource(p.board.boardId, c),
+    private readonly sourceFactory: (
+      p: ProjectConfig,
+      cred: BoardCredential,
+    ) => BoardSource = createBoardSource,
     /** Absent when webhooks are off or `start --no-webhook` was passed. */
     private readonly webhookServer: WebhookServer | null = null,
     private readonly webhookEnv: {
@@ -112,12 +114,6 @@ export class Orchestrator {
 
     for (const project of this.loaded.config.projects) {
       if (!project.enabled) continue;
-      if (project.board.provider !== 'trello') {
-        this.log.warn(
-          `${project.id}: provider ${project.board.provider} not implemented yet — skipped`,
-        );
-        continue;
-      }
       const cred = creds.get(project.board.credentials);
       if (!cred)
         throw new Error(`${project.id}: credential ref ${project.board.credentials} unresolved`);
@@ -143,6 +139,7 @@ export class Orchestrator {
       this.runtimes.set(project.id, {
         project,
         source,
+        registrar: isWebhookRegistrar(inner) ? inner : null,
         sync,
         writer,
         buffer,
@@ -218,7 +215,7 @@ export class Orchestrator {
     await server.start();
 
     for (const rt of wired) {
-      const { project, cred, buffer } = rt;
+      const { project, cred, buffer, registrar } = rt;
       const callbackURL = callbackUrlFor(
         publicUrl,
         this.webhookEnv.pathPrefix,
@@ -228,12 +225,8 @@ export class Orchestrator {
       try {
         const apiSecret = requireApiSecret(cred, project.id);
         if (project.board.webhook.manageRegistration) {
-          const r = await ensureWebhook(
-            rt.source as unknown as WebhookRegistrar,
-            project.board.boardId,
-            project.id,
-            callbackURL,
-          );
+          if (!registrar) throw new Error(`${project.board.provider} cannot register webhooks`);
+          const r = await ensureWebhook(registrar, project.board.boardId, project.id, callbackURL);
           rt.webhookId = r.id;
           this.boardStore.noteWebhookRegistration(project.id, r.id, callbackURL);
           this.log.info(
@@ -269,9 +262,9 @@ export class Orchestrator {
   private async stopWebhooks(): Promise<void> {
     if (!this.webhookServer) return;
     for (const rt of this.runtimes.values()) {
-      if (!rt.webhookId || !rt.project.board.webhook.deleteOnShutdown) continue;
+      if (!rt.webhookId || !rt.registrar || !rt.project.board.webhook.deleteOnShutdown) continue;
       try {
-        await removeWebhook(rt.source as unknown as WebhookRegistrar, rt.webhookId);
+        await removeWebhook(rt.registrar, rt.webhookId);
       } catch (err) {
         this.log.warn(
           `${rt.project.id}: could not delete webhook: ${err instanceof Error ? err.message : String(err)}`,

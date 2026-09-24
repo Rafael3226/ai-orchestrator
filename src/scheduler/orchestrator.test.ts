@@ -383,3 +383,82 @@ describe('role handoff end to end', () => {
     store.close();
   }, 90_000);
 });
+
+describe.each([
+  ['azure-devops', 'organization: contoso\n      project: Web', 'ADO_X', { ADO_X_PAT: 'p' }],
+  [
+    'jira',
+    'site: acme\n      projectKey: SHOP',
+    'JIRA_X',
+    { JIRA_X_EMAIL: 'e', JIRA_X_API_TOKEN: 't' },
+  ],
+] as const)('%s board through the daemon', (provider, location, ref, env) => {
+  const providerYaml = (repoPath: string, wt: string) => `
+version: 1
+projects:
+  - id: demo
+    name: Demo
+    repo: { path: ${JSON.stringify(repoPath)}, worktreeRoot: ${JSON.stringify(wt)}, githubRepo: me/demo }
+    board:
+      provider: ${provider}
+      ${location}
+      credentials: ${ref}
+      botMemberId: bot
+      poll: { intervalSeconds: 5, reconcileEveryTicks: 100, reconcileOnStart: false }
+      columns: { ready: Ready, inProgress: Active, blocked: Blocked }
+    agents: { DEV-BE: { enabled: true } }
+    routes:
+      - when: { column: Ready }
+        agent: DEV-BE
+    writeback:
+      onStart:   { move: inProgress, comment: started }
+      onFailure: { move: blocked, comment: report, addLabel: ai-failed }
+`;
+
+  it('boots the project, routes a card, and writes freeform labels back', async () => {
+    const store = new SqliteStore(':memory:');
+    const boardStore = new BoardStore(store);
+    const board = new FakeBoardSource('b', ['New', 'Ready', 'Active', 'Blocked'], [], [], {
+      provider,
+      freeformLabels: true,
+    });
+    const loaded = loadConfigFromString(providerYaml(repo, join(base, 'wt')), 'x');
+    const warnings: string[] = [];
+    let built = 0;
+    const orch = new Orchestrator(
+      loaded,
+      store,
+      new FakeDriver(),
+      { ...quiet, warn: (m) => warnings.push(m) },
+      () => (built++, board),
+    );
+    Object.assign(process.env, env);
+    await orch.start();
+    await orch.stop();
+    // Once skipped as "not implemented yet"; now a first-class project.
+    expect(built).toBe(1);
+    expect(warnings.join('\n')).not.toMatch(/not implemented/);
+
+    const { BoardSync } = await import('../board/board.sync.js');
+    const { BoardWriter } = await import('../board/board.writer.js');
+    const project = loaded.project('demo');
+    const sync = new BoardSync(project, board, store, boardStore, quiet);
+    const writer = new BoardWriter(project, board, boardStore, sync.router, quiet);
+    await sync.tick(); // cold start
+
+    const card = board.addCard('7', 'Fix it', 'New');
+    board.humanMove(card.id, 'Ready');
+    expect((await sync.tick()).dispatched).toHaveLength(1);
+    const task = store.listTasks({ state: 'queued' })[0]!;
+    expect(task.card_short_id).toBe('7');
+
+    // A label the board has never seen: created on first use, not dead-lettered.
+    writer.enqueueStep('onFailure', project.writeback.onFailure, task.id, card.id, 'report');
+    await writer.drain(await sync.getTopology());
+    const after = await board.getCard(card.id);
+    expect(after.columnId).toBe(board.columnId('Blocked'));
+    expect(after.labelNames).toEqual(['ai-failed']);
+    expect(boardStore.outboxCounts()).toEqual({ done: 3 });
+    store.close();
+  }, 60_000);
+});

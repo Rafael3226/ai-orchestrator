@@ -13,6 +13,11 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
   { kind: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
   { kind: 'slack-token', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
   { kind: 'trello-token', re: /\bATTA[0-9a-f]{60,}\b/ },
+  // Azure DevOps PATs: the 84-character format carries an `AZDO` signature;
+  // the legacy format is 52 characters of lowercase base32.
+  { kind: 'azure-devops-pat', re: /\b[A-Za-z0-9]{76}AZDO[A-Za-z0-9]{4}\b/ },
+  { kind: 'azure-devops-pat-legacy', re: /\b[a-z2-7]{52}\b/ },
+  { kind: 'atlassian-api-token', re: /\bATATT3[A-Za-z0-9_=-]{100,}/ },
   { kind: 'jwt', re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/ },
   {
     kind: 'generic-secret-assignment',

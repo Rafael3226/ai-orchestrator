@@ -180,6 +180,146 @@ export const routeSchema = z.strictObject({
   priority: z.number().int().default(0),
 });
 
+const credentialRef = z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'UPPER_SNAKE_CASE credential ref');
+const adoOrganization = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9-]*$/, 'the organization name from dev.azure.com/{organization}');
+
+export const REPO_HOSTS = ['github', 'azure-devops'] as const;
+export type RepoHostProvider = (typeof REPO_HOSTS)[number];
+
+const githubHostSchema = z.strictObject({
+  provider: z.literal('github'),
+  /** owner/name — used by `gh pr create --repo`. */
+  githubRepo: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name'),
+});
+
+const azureReposHostSchema = z.strictObject({
+  provider: z.literal('azure-devops'),
+  organization: adoOrganization,
+  project: z.string().trim().min(1),
+  repository: z.string().trim().min(1),
+  /** `<REF>_PAT` needs Code (read & write) for push and pull requests. */
+  credentials: credentialRef,
+});
+
+export const repoHostSchema = z.discriminatedUnion('provider', [
+  githubHostSchema,
+  azureReposHostSchema,
+]);
+
+const repoSchema = z
+  .strictObject({
+    path: z.string().min(1),
+    remote: z.string().min(1).default('origin'),
+    baseBranch: z.string().min(1).default('main'),
+    worktreeRoot: z.string().min(1),
+    /** Shorthand for `host: { provider: github, githubRepo }`. Normalized away at parse. */
+    githubRepo: githubHostSchema.shape.githubRepo.optional(),
+    host: repoHostSchema.optional(),
+    branchTemplate: z.string().min(1).default('ai/{role}/{cardShortId}-{slug}'),
+  })
+  .superRefine((r, ctx) => {
+    if (r.githubRepo === undefined && r.host === undefined) {
+      ctx.addIssue({ code: 'custom', message: 'set `host` (or the `githubRepo` shorthand)' });
+    }
+    if (r.githubRepo !== undefined && r.host !== undefined) {
+      ctx.addIssue({ code: 'custom', message: '`githubRepo` is shorthand for `host`; use one' });
+    }
+  })
+  .transform(({ githubRepo, host, ...rest }) => ({
+    ...rest,
+    host: host ?? { provider: 'github' as const, githubRepo: githubRepo as string },
+  }));
+
+/** Fields every board provider shares. */
+const boardBase = {
+  credentials: credentialRef,
+  /**
+   * The identity the orchestrator writes as — the loop guard ignores its own
+   * events. Trello member id, Azure DevOps identity id, Jira accountId. Print
+   * it with `board whoami`.
+   */
+  botMemberId: z.string().min(1).optional(),
+  poll: z
+    .strictObject({
+      intervalSeconds: z.number().int().min(5).max(600).default(15),
+      reconcileEveryTicks: z.number().int().min(1).default(40),
+      reconcileOnStart: z.boolean().default(true),
+    })
+    .prefault({}),
+  webhook: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      /** Reconcile the provider-side registration at every boot. */
+      manageRegistration: z.boolean().default(true),
+      /** Dev tunnels: the URL dies with the process, so drop the registration. */
+      deleteOnShutdown: z.boolean().default(false),
+      maxBufferedEvents: z.number().int().min(10).max(10_000).default(500),
+      maxEventAgeSeconds: z.number().int().min(30).max(86_400).default(600),
+    })
+    .prefault({}),
+  /** semantic alias -> board column name (Trello list, ADO state, Jira status) */
+  columns: z.record(columnAlias, columnName).default({}),
+} as const;
+
+const trelloBoardSchema = z.strictObject({
+  provider: z.literal('trello'),
+  boardId: z.string().min(1),
+  ...boardBase,
+});
+
+const adoBoardSchema = z.strictObject({
+  provider: z.literal('azure-devops'),
+  organization: adoOrganization,
+  project: z.string().trim().min(1),
+  /** Only these work item types are picked up. Their states are the columns. */
+  workItemTypes: z.array(z.string().trim().min(1)).min(1).default(['User Story', 'Bug', 'Task']),
+  /** Optional `UNDER` filter, e.g. `MyProject\Team A`. */
+  areaPath: z.string().trim().min(1).optional(),
+  ...boardBase,
+});
+
+const jiraBoardSchema = z.strictObject({
+  provider: z.literal('jira'),
+  /** `acme` or `acme.atlassian.net`. */
+  site: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9][a-z0-9-]*(\.atlassian\.net)?$/, 'acme or acme.atlassian.net')
+    .transform((s) => (s.endsWith('.atlassian.net') ? s : `${s}.atlassian.net`)),
+  projectKey: z.string().regex(/^[A-Z][A-Z0-9_]+$/, 'a Jira project key like PROJ'),
+  issueTypes: z.array(z.string().trim().min(1)).min(1).optional(),
+  /** Extra JQL ANDed onto the project filter, e.g. `component = Backend`. */
+  jql: z.string().trim().min(1).optional(),
+  ...boardBase,
+});
+
+/**
+ * `boardId` is filled in for every provider: it is the key the sync state,
+ * the one-board-per-project check and the logs use.
+ */
+export const boardSchema = z
+  .discriminatedUnion('provider', [trelloBoardSchema, adoBoardSchema, jiraBoardSchema])
+  .transform((b) => ({ ...b, boardId: boardKey(b) }));
+
+type BoardInput =
+  | z.output<typeof trelloBoardSchema>
+  | z.output<typeof adoBoardSchema>
+  | z.output<typeof jiraBoardSchema>;
+
+function boardKey(b: BoardInput): string {
+  switch (b.provider) {
+    case 'trello':
+      return b.boardId;
+    case 'azure-devops':
+      return `${b.organization}/${b.project}${b.areaPath ? `:${b.areaPath}` : ''}`;
+    case 'jira':
+      return `${b.site}/${b.projectKey}${b.jql ? `?${b.jql}` : ''}`;
+  }
+}
+
 export const projectSchema = z.strictObject({
   /** SQLite key, URL segment and office room id. */
   id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,38}$/, 'kebab-case, 2-39 chars'),
@@ -189,15 +329,7 @@ export const projectSchema = z.strictObject({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/, 'hex colour like #3b82f6')
     .default('#64748b'),
-  repo: z.strictObject({
-    path: z.string().min(1),
-    remote: z.string().min(1).default('origin'),
-    baseBranch: z.string().min(1).default('main'),
-    worktreeRoot: z.string().min(1),
-    /** owner/name — used by `gh pr create --repo`. */
-    githubRepo: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name'),
-    branchTemplate: z.string().min(1).default('ai/{role}/{cardShortId}-{slug}'),
-  }),
+  repo: repoSchema,
   checks: z
     .strictObject({
       install: z.string().min(1).optional(),
@@ -210,32 +342,7 @@ export const projectSchema = z.strictObject({
       timeoutMinutes: z.number().int().positive().max(120).default(15),
     })
     .prefault({}),
-  board: z.strictObject({
-    provider: z.enum(BOARD_PROVIDERS),
-    boardId: z.string().min(1),
-    credentials: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'UPPER_SNAKE_CASE credential ref'),
-    botMemberId: z.string().min(1).optional(),
-    poll: z
-      .strictObject({
-        intervalSeconds: z.number().int().min(5).max(600).default(15),
-        reconcileEveryTicks: z.number().int().min(1).default(40),
-        reconcileOnStart: z.boolean().default(true),
-      })
-      .prefault({}),
-    webhook: z
-      .strictObject({
-        enabled: z.boolean().default(false),
-        /** Reconcile the provider-side registration at every boot. */
-        manageRegistration: z.boolean().default(true),
-        /** Dev tunnels: the URL dies with the process, so drop the registration. */
-        deleteOnShutdown: z.boolean().default(false),
-        maxBufferedEvents: z.number().int().min(10).max(10_000).default(500),
-        maxEventAgeSeconds: z.number().int().min(30).max(86_400).default(600),
-      })
-      .prefault({}),
-    /** semantic alias -> board column name */
-    columns: z.record(columnAlias, columnName).default({}),
-  }),
+  board: boardSchema,
   exec: execOverlaySchema.optional(),
   agents: z.partialRecord(roleSchema, agentOverrideSchema).default({}),
   routes: z.array(routeSchema).min(1),
@@ -305,5 +412,9 @@ export type RouteConfig = z.output<typeof routeSchema>;
 export type WritebackStep = z.output<typeof writebackStepSchema>;
 export type DockerConfig = z.output<typeof dockerConfigSchema>;
 export type ExecConfig = z.output<typeof execConfigSchema>;
+export type BoardConfig = z.output<typeof boardSchema>;
+export type AdoBoardConfig = Extract<BoardConfig, { provider: 'azure-devops' }>;
+export type JiraBoardConfig = Extract<BoardConfig, { provider: 'jira' }>;
+export type RepoHostConfig = z.output<typeof repoHostSchema>;
 export type AgentSettings = z.output<typeof agentSettingsSchema>;
 export type Budget = z.output<typeof budgetSchema>;

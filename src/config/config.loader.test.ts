@@ -35,7 +35,10 @@ describe('loadConfigFromString', () => {
     expect(p.agents['DEV-BE'].budget.maxUsd).toBe(6);
     expect(p.agents.QA.enabled).toBe(false);
     expect(p.agents.PM.model).toBe('haiku');
-    expect(loaded.credentialRefs.get('TRELLO_MAIN')).toEqual(['ai-auto-apply']);
+    expect(loaded.credentialRefs.get('TRELLO_MAIN')).toEqual({
+      kind: 'trello',
+      projects: ['ai-auto-apply'],
+    });
     expect(Object.isFrozen(loaded.config.projects)).toBe(true);
   });
 
@@ -112,6 +115,11 @@ describe('loadConfigFromString', () => {
   });
 
   /** A project whose board block carries extra keys, built as real YAML. */
+  const LOCATION: Record<string, string> = {
+    trello: 'boardId: b1',
+    jira: 'site: acme\n      projectKey: PROJ',
+    'azure-devops': 'organization: contoso\n      project: Web',
+  };
   const withBoard = (extra: string, provider = 'trello') =>
     `
 version: 1
@@ -121,7 +129,7 @@ projects:
     repo: { path: /repo, worktreeRoot: /wt, githubRepo: me/demo }
     board:
       provider: ${provider}
-      boardId: b1
+      ${LOCATION[provider]}
       credentials: TRELLO_X
       botMemberId: m1
       columns: { ready: Ready, review: Review }
@@ -218,4 +226,109 @@ projects:
     expect(loaded.project('demo').routes.map((r) => r.index)).toEqual([1, 0]);
   });
 
+  describe('providers', () => {
+    const project = (board: string, repo = 'githubRepo: me/demo', extra = '') => `
+version: 1
+projects:
+  - id: demo
+    name: Demo
+    repo: { path: /repo, worktreeRoot: /wt, ${repo} }
+    board:
+${board}
+      botMemberId: m1
+      columns: { ready: Ready, review: In Review }
+    agents: { DEV-BE: { enabled: true } }
+    routes:
+      - when: { column: Ready }
+        agent: DEV-BE
+${extra}
+`;
+    const ado = `      provider: azure-devops
+      organization: contoso
+      project: Web Shop
+      credentials: ADO_MAIN`;
+    const jira = `      provider: jira
+      site: Acme
+      projectKey: SHOP
+      credentials: JIRA_MAIN`;
+
+    it('loads an Azure DevOps board with its defaults and derives a board key', () => {
+      const p = loadConfigFromString(project(ado), 'x.yaml').project('demo');
+      expect(p.board.provider).toBe('azure-devops');
+      if (p.board.provider !== 'azure-devops') return;
+      expect(p.board.workItemTypes).toEqual(['User Story', 'Bug', 'Task']);
+      expect(p.board.boardId).toBe('contoso/Web Shop');
+    });
+
+    it('loads a Jira board and normalizes the site', () => {
+      const p = loadConfigFromString(project(jira), 'x.yaml').project('demo');
+      if (p.board.provider !== 'jira') throw new Error('expected jira');
+      expect(p.board.site).toBe('acme.atlassian.net');
+      expect(p.board.boardId).toBe('acme.atlassian.net/SHOP');
+    });
+
+    it('rejects provider fields on the wrong provider', () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const bad = project(`${jira}
+      organization: contoso`);
+      expect(() => loadConfigFromString(bad, 'x.yaml')).toThrow(/Invalid config/);
+    });
+
+    it('turns the githubRepo shorthand into a github host', () => {
+      const p = loadConfigFromString(project(ado), 'x.yaml').project('demo');
+      expect(p.repo.host).toEqual({ provider: 'github', githubRepo: 'me/demo' });
+    });
+
+    it('accepts an Azure Repos host and counts its credential ref', () => {
+      const loaded = loadConfigFromString(
+        project(
+          ado,
+          'host: { provider: azure-devops, organization: contoso, project: Web Shop, repository: shop, credentials: ADO_MAIN }',
+        ),
+        'x.yaml',
+      );
+      expect(loaded.project('demo').repo.host.provider).toBe('azure-devops');
+      // One PAT for the board and the repo: one ref, one project.
+      expect(loaded.credentialRefs.get('ADO_MAIN')).toEqual({
+        kind: 'azure-devops',
+        projects: ['demo'],
+      });
+    });
+
+    it('rejects a repo with neither host nor githubRepo, or both', () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(() => loadConfigFromString(project(ado, 'branchTemplate: x'), 'x.yaml')).toThrow(
+        /Invalid config/,
+      );
+      expect(() =>
+        loadConfigFromString(
+          project(ado, 'githubRepo: me/demo, host: { provider: github, githubRepo: me/demo }'),
+          'x.yaml',
+        ),
+      ).toThrow(/Invalid config/);
+    });
+
+    it('rejects one credential ref used by two providers', () => {
+      const errors: string[] = [];
+      vi.spyOn(console, 'error').mockImplementation((m: unknown) => void errors.push(String(m)));
+      const bad = project(
+        jira.replace('JIRA_MAIN', 'SHARED'),
+        'host: { provider: azure-devops, organization: contoso, project: Web, repository: shop, credentials: SHARED }',
+      );
+      expect(() => loadConfigFromString(bad, 'x.yaml')).toThrow(/Invalid config/);
+      expect(errors.join(' ')).toMatch(/already a jira credential/);
+    });
+
+    it('rejects label names the provider cannot store', () => {
+      const errors: string[] = [];
+      vi.spyOn(console, 'error').mockImplementation((m: unknown) => void errors.push(String(m)));
+      const bad = project(
+        jira,
+        undefined,
+        '    writeback:\n      onFailure: { addLabel: needs human }',
+      );
+      expect(() => loadConfigFromString(bad, 'x.yaml')).toThrow(/Invalid config/);
+      expect(errors.join(' ')).toMatch(/Jira labels cannot contain spaces/);
+    });
+  });
 });

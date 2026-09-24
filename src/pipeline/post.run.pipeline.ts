@@ -2,10 +2,11 @@ import type { ProjectConfig } from '../config/config.loader.js';
 import type { ExecResult } from '../exec/exec.driver.js';
 import type { BlockedReport, Decision, ProposedSummary } from '../mcp/board.schemas.js';
 import type { DeliveryPolicy } from '../policy/delivery.policy.js';
+import { gitAuthEnv, pushAuthHint } from '../workspace/git.auth.js';
 import type { WorkspaceHandle } from '../workspace/worktree.manager.js';
 
 import { type DiffStat, GitPublisher, PublishAbort } from './git.publisher.js';
-import { PrPublisher } from './pr.publisher.js';
+import { createPrHost, linkedWorkItems, type PrHost } from './pr.host.js';
 import { buildPrBody, type ReportInput } from './report.builder.js';
 import type { VerifyResult } from './verify.runner.js';
 
@@ -49,10 +50,10 @@ export type PublishOutput =
       readonly hooksBypassed: false;
     };
 
-/** Seams for tests: publishing otherwise needs a real remote and a real `gh`. */
+/** Seams for tests: publishing otherwise needs a real remote and a real PR host. */
 export interface PublishDeps {
   readonly git?: GitPublisher;
-  readonly pr?: PrPublisher;
+  readonly pr?: PrHost;
 }
 
 /**
@@ -62,7 +63,7 @@ export interface PublishDeps {
 export async function publish(input: PublishInput, deps: PublishDeps = {}): Promise<PublishOutput> {
   const { project, workspace, log } = input;
   const git = deps.git ?? new GitPublisher();
-  const pr = deps.pr ?? new PrPublisher((m) => log(`⚠ ${m}`));
+  const pr = deps.pr ?? createPrHost(project, (m) => log(`⚠ ${m}`));
   const allowEmpty = input.delivery.diff === 'optional';
 
   log('stage + scan diff');
@@ -95,7 +96,10 @@ export async function publish(input: PublishInput, deps: PublishDeps = {}): Prom
   if (hooksBypassed) log('commit hooks failed — committed with --no-verify');
 
   log(`push ${project.repo.remote} ${workspace.branch}`);
-  await git.push(workspace.path, project.repo.remote, workspace.branch);
+  await git.push(workspace.path, project.repo.remote, workspace.branch, {
+    env: gitAuthEnv(project),
+    authHint: pushAuthHint(project),
+  });
 
   const report: ReportInput = {
     runId: input.runId,
@@ -120,7 +124,6 @@ export async function publish(input: PublishInput, deps: PublishDeps = {}): Prom
   log('open draft PR');
   const prUrl = await pr.createDraft({
     cwd: workspace.path,
-    githubRepo: project.repo.githubRepo,
     base: project.repo.baseBranch,
     head: workspace.branch,
     title: `${input.wip ? '[WIP] ' : ''}[${input.cardShortId}] ${input.summary.title}`.slice(
@@ -130,6 +133,7 @@ export async function publish(input: PublishInput, deps: PublishDeps = {}): Prom
     body: buildPrBody(report),
     draft: project.pr.draft,
     labels: input.wip ? [...project.pr.labels, 'ai-needs-human'] : project.pr.labels,
+    workItemIds: linkedWorkItems(project, input.cardShortId),
   });
   log(`PR: ${prUrl}`);
   return { kind: 'pull-request', diff, sha, prUrl, hooksBypassed };

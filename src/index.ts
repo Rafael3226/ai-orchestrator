@@ -3,7 +3,14 @@ import { readFileSync } from 'node:fs';
 
 import { Command } from 'commander';
 
-import { describeBoard, initBoard, listBoards, showStatus } from './cli/board.commands.js';
+import {
+  type BoardCliOptions,
+  describeBoard,
+  initBoard,
+  listBoards,
+  showStatus,
+  whoAmI,
+} from './cli/board.commands.js';
 import { runDoctor } from './cli/doctor.js';
 import { buildImage, checkImage, pullImage } from './cli/image.js';
 import { republish } from './cli/republish.js';
@@ -118,28 +125,49 @@ program
     process.exitCode = await runDoctor();
   });
 
+const PROVIDER_HELP = 'trello|azure-devops|jira';
+const TARGET_HELP = 'Trello board id · Azure DevOps organization/project · Jira site/PROJECTKEY';
+
 program
-  .command('boards')
-  .description('List Trello boards visible to a credential ref (and the bot member id)')
+  .command('boards [target]')
+  .description(
+    'List Trello boards, or the projects in an Azure DevOps organization / Jira site, plus the bot id',
+  )
+  .option('-p, --provider <provider>', PROVIDER_HELP, 'trello')
   .option('-c, --cred <ref>', 'credential ref, e.g. TRELLO_MAIN', 'TRELLO_MAIN')
-  .action(async (o: { cred: string }) => {
-    process.exitCode = await listBoards(o.cred);
+  .action(async (target: string | undefined, o: BoardCliOptions) => {
+    process.exitCode = await listBoards(target, o);
   });
 
 program
-  .command('lists <boardId>')
-  .description('Show a board’s columns, labels and members with their ids')
+  .command('lists <target>')
+  .alias('columns')
+  .description(`Show a board’s columns, labels and members with their ids (${TARGET_HELP})`)
+  .option('-p, --provider <provider>', PROVIDER_HELP, 'trello')
   .option('-c, --cred <ref>', 'credential ref', 'TRELLO_MAIN')
-  .action(async (boardId: string, o: { cred: string }) => {
-    process.exitCode = await describeBoard(boardId, o.cred);
+  .action(async (target: string, o: BoardCliOptions) => {
+    process.exitCode = await describeBoard(target, o);
+  });
+
+program
+  .command('whoami [target]')
+  .description('Print the identity a credential ref writes as: the value for board.botMemberId')
+  .option('-p, --provider <provider>', PROVIDER_HELP, 'trello')
+  .option('-c, --cred <ref>', 'credential ref', 'TRELLO_MAIN')
+  .action(async (target: string | undefined, o: BoardCliOptions) => {
+    process.exitCode = await whoAmI(target ?? '_', o);
   });
 
 program
   .command('init-board <name>')
-  .description('Create a Trello board with the standard columns and labels (writes to Trello)')
+  .description(
+    'Trello: create a board with the standard columns and labels. Azure DevOps / Jira: ' +
+      'print a board block for <organization/project | site/KEY> mapping its existing states',
+  )
+  .option('-p, --provider <provider>', PROVIDER_HELP, 'trello')
   .option('-c, --cred <ref>', 'credential ref', 'TRELLO_MAIN')
-  .action(async (name: string, o: { cred: string }) => {
-    process.exitCode = await initBoard(name, o.cred);
+  .action(async (name: string, o: BoardCliOptions) => {
+    process.exitCode = await initBoard(name, o);
   });
 
 program

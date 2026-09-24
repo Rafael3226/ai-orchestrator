@@ -18,6 +18,11 @@ export interface EnsureResult {
  * which one is missing and where to find it.
  */
 export function requireApiSecret(cred: BoardCredential, projectId: string): string {
+  if (cred.kind !== 'trello') {
+    throw new Error(
+      `project ${projectId}: webhooks are only implemented for trello, not ${cred.kind}`,
+    );
+  }
   if (!cred.apiSecret) {
     throw new Error(
       `project ${projectId}: webhooks need the API secret — set ${cred.ref}_API_SECRET ` +

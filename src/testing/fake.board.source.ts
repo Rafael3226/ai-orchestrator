@@ -1,4 +1,9 @@
-import type { BoardCapabilities, BoardPollResult, BoardSource } from '../board/board.source.js';
+import {
+  BoardError,
+  type BoardCapabilities,
+  type BoardPollResult,
+  type BoardSource,
+} from '../board/board.source.js';
 import type {
   BoardCard,
   BoardColumn,
@@ -7,8 +12,16 @@ import type {
   BoardEventKind,
   BoardLabel,
   BoardMember,
+  BoardProviderKey,
   BoardTopology,
 } from '../board/board.types.js';
+
+export interface FakeBoardOptions {
+  /** Which provider to impersonate; only the key and label semantics change. */
+  readonly provider?: BoardProviderKey;
+  /** Azure DevOps / Jira: labels are created on first use, and their id is the name. */
+  readonly freeformLabels?: boolean;
+}
 
 /**
  * In-memory board. Every mutation (from a test OR from writeback) appends an
@@ -16,16 +29,8 @@ import type {
  * are exercised for real without a network.
  */
 export class FakeBoardSource implements BoardSource {
-  readonly provider = 'trello' as const;
-  readonly capabilities: BoardCapabilities = {
-    hasChangeFeed: true,
-    canComment: true,
-    canMoveCard: true,
-    canAssignMember: true,
-    canAddLabel: true,
-    labelsAreFreeform: false,
-    canRegisterWebhook: false,
-  };
+  readonly provider: BoardProviderKey;
+  readonly capabilities: BoardCapabilities;
 
   readonly columns: BoardColumn[];
   readonly labels: BoardLabel[];
@@ -44,7 +49,18 @@ export class FakeBoardSource implements BoardSource {
     columns: readonly string[],
     labels: readonly string[] = [],
     members: readonly BoardMember[] = [],
+    opts: FakeBoardOptions = {},
   ) {
+    this.provider = opts.provider ?? 'trello';
+    this.capabilities = {
+      hasChangeFeed: true,
+      canComment: true,
+      canMoveCard: true,
+      canAssignMember: true,
+      canAddLabel: true,
+      labelsAreFreeform: opts.freeformLabels ?? false,
+      canRegisterWebhook: false,
+    };
     this.columns = columns.map((name, i) => ({ id: `list-${i}`, name, position: i }));
     this.labels = labels.map((name, i) => ({ id: `label-${i}`, name, color: null }));
     this.members = [
@@ -118,7 +134,7 @@ export class FakeBoardSource implements BoardSource {
   }
   async getCard(cardId: string): Promise<BoardCard> {
     const c = this.cards.get(cardId);
-    if (!c) throw new Error(`card ${cardId} not found`);
+    if (!c) throw new BoardError('not-found', `card ${cardId} not found`, 404);
     return c;
   }
   async poll(cursor: string | null): Promise<BoardPollResult> {
@@ -144,7 +160,10 @@ export class FakeBoardSource implements BoardSource {
   }
   async removeLabel(cardId: string, labelId: string): Promise<void> {
     const c = await this.getCard(cardId);
-    this.patch(cardId, { labelIds: c.labelIds.filter((l) => l !== labelId) });
+    const keep = c.labelIds
+      .map((id, i) => [id, c.labelNames[i] ?? id] as const)
+      .filter(([id]) => id !== labelId);
+    this.patch(cardId, { labelIds: keep.map(([id]) => id), labelNames: keep.map(([, n]) => n) });
     this.emit('card.unlabeled', cardId, this.botId, { labelId });
   }
   async assignMember(cardId: string, memberId: string): Promise<void> {
@@ -192,7 +211,7 @@ export class FakeBoardSource implements BoardSource {
     this.events.push({
       eventId: `fake:${++this.seq}`,
       kind,
-      provider: 'trello',
+      provider: this.provider,
       boardId: this.boardId,
       cardId,
       occurredAt: this.now(),

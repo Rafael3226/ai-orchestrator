@@ -173,10 +173,13 @@ export class BoardWriter {
       case 'add-label':
       case 'remove-label': {
         if (!caps.canAddLabel) return 'skipped';
-        const label = findLabelByName(topology, payload['label'] ?? '');
+        const name = (payload['label'] ?? '').trim();
+        // Freeform providers (Azure DevOps tags, Jira labels) create a label on
+        // first use, and their label id IS the name.
+        const label =
+          findLabelByName(topology, name) ??
+          (caps.labelsAreFreeform && name ? { id: name, name, color: null } : undefined);
         if (!label) {
-          if (caps.labelsAreFreeform)
-            throw new BoardError('permission', 'freeform labels not implemented');
           this.log.warn(
             `${this.project.id}: label "${payload['label']}" does not exist on the board — skipped`,
           );

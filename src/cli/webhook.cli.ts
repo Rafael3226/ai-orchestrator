@@ -1,7 +1,11 @@
 import { TrelloSource } from '../board/trello/trello.source.js';
 import type { ProjectConfig } from '../config/config.loader.js';
 import { loadConfig } from '../config/config.loader.js';
-import { resolveBoardCredentials, type BoardCredential } from '../config/credentials.js';
+import {
+  type BoardCredential,
+  credentialOf,
+  resolveBoardCredentials,
+} from '../config/credentials.js';
 import { loadOrchestratorEnv } from '../config/env.js';
 
 import {
@@ -29,10 +33,12 @@ function targets(projectId?: string): {
   for (const project of loaded.config.projects) {
     if (projectId && project.id !== projectId) continue;
     if (!projectId && (!project.enabled || !project.board.webhook.enabled)) continue;
+    // Webhooks are Trello-only for now; the other providers poll.
     if (project.board.provider !== 'trello') continue;
     const cred = creds.get(project.board.credentials);
     if (!cred) continue;
-    out.push({ project, cred, source: new TrelloSource(project.board.boardId, cred) });
+    const trello = credentialOf(cred, 'trello', project.board.credentials);
+    out.push({ project, cred, source: new TrelloSource(project.board.boardId, trello) });
   }
   return { targets: out, env };
 }

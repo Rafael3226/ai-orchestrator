@@ -7,11 +7,16 @@ const LOCK_RE = /index\.lock|Unable to create .* File exists|could not lock/i;
 export class GitCli {
   constructor(private readonly timeoutMs = 120_000) {}
 
-  async run(cwd: string, args: readonly string[], timeoutMs = this.timeoutMs): Promise<string> {
+  async run(
+    cwd: string,
+    args: readonly string[],
+    timeoutMs = this.timeoutMs,
+    env: Readonly<Record<string, string>> = {},
+  ): Promise<string> {
     let attempt = 0;
     for (;;) {
       try {
-        const r = await runOrThrow('git', args, { cwd, timeoutMs, env: GIT_ENV });
+        const r = await runOrThrow('git', args, { cwd, timeoutMs, env: { ...env, ...GIT_ENV } });
         return r.stdout.trim();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -24,8 +29,16 @@ export class GitCli {
     }
   }
 
-  async tryRun(cwd: string, args: readonly string[]): Promise<CommandResult> {
-    return runCommand('git', args, { cwd, timeoutMs: this.timeoutMs, env: GIT_ENV });
+  async tryRun(
+    cwd: string,
+    args: readonly string[],
+    env: Readonly<Record<string, string>> = {},
+  ): Promise<CommandResult> {
+    return runCommand('git', args, {
+      cwd,
+      timeoutMs: this.timeoutMs,
+      env: { ...env, ...GIT_ENV },
+    });
   }
 
   async isRepo(path: string): Promise<boolean> {
@@ -42,13 +55,24 @@ export class GitCli {
     return r.exitCode === 0;
   }
 
-  async remoteBranchExists(cwd: string, remote: string, branch: string): Promise<boolean> {
-    const r = await this.tryRun(cwd, ['ls-remote', '--exit-code', '--heads', remote, branch]);
+  /** `env` carries per-host auth for network commands; see pipeline/git.auth. */
+  async remoteBranchExists(
+    cwd: string,
+    remote: string,
+    branch: string,
+    env: Readonly<Record<string, string>> = {},
+  ): Promise<boolean> {
+    const r = await this.tryRun(cwd, ['ls-remote', '--exit-code', '--heads', remote, branch], env);
     return r.exitCode === 0;
   }
 
-  async fetch(cwd: string, remote: string, branch: string): Promise<void> {
-    await this.run(cwd, ['fetch', '--no-tags', '--prune', remote, branch], 180_000);
+  async fetch(
+    cwd: string,
+    remote: string,
+    branch: string,
+    env: Readonly<Record<string, string>> = {},
+  ): Promise<void> {
+    await this.run(cwd, ['fetch', '--no-tags', '--prune', remote, branch], 180_000, env);
   }
 
   async worktreeList(

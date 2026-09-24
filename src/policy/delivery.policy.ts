@@ -57,6 +57,9 @@ export const ROLE_DELIVERY: Readonly<Record<Role, DeliveryPolicy>> = {
     requireCommit: true,
     writeGlobs: [
       '.github/**',
+      '.azuredevops/**',
+      'azure-pipelines*.yml',
+      'azure-pipelines*.yaml',
       'Dockerfile*',
       'docker/**',
       'docker-compose*',

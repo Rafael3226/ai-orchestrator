@@ -91,3 +91,32 @@ publisher reads it moments later to stage, commit and push.
 
 _Why install and verify moved into the container too._ Not speed — a host
 `pnpm install` produces win32 native binaries a Linux container cannot load.
+
+## Azure DevOps and Jira: State and status as columns, polling first
+
+**Phase 6.** A board column is the Azure DevOps work item **State** and the Jira
+issue **status**. Azure DevOps Kanban columns are team-scoped, optional, and
+live in a `WEF_*` field whose name differs per team. State is on every process
+template and is what every REST client reads, so it is the stable key the
+router, the arrival ledger and the dedupe key need. Jira statuses are tracked
+by id, so a rename does not re-route anything, and a move runs whichever
+workflow transition reaches the target.
+
+_Why polling first._ Neither provider has Trello's board-wide action feed, so
+the change feed is synthesized. Azure DevOps runs a WIQL query for changed
+items, then reads their revision updates. Jira runs one search with the
+changelog expanded. Each poll overlaps the last by two minutes, and the event
+store's dedupe on `eventId` makes that overlap free. Webhooks (Azure DevOps
+service hooks, Jira webhooks) can later push into the same
+`WebhookBufferedSource` the Trello path uses, without changing the cursor
+semantics.
+
+_Freeform labels._ Azure DevOps tags and Jira labels need not exist in advance,
+so those sources report labels with `id = name`. The writer uses a name that is
+not on the board as-is, rather than dead-lettering it.
+
+_Repo host is its own axis._ The board and the pull request host are
+independent (`board.provider`, `repo.host.provider`). The publisher talks to a
+`PrHost`: `gh` for GitHub, REST for Azure Repos. The Azure Repos PAT reaches git
+only as an env-scoped `http.<url>.extraheader`, never argv, so it cannot leak
+into a process listing or the repo's config.

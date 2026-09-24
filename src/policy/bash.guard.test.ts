@@ -42,6 +42,8 @@ const denied: [string, RegExp][] = [
   ['git remote -v', /network git/],
   ['git fetch', /network git/],
   ['gh pr create', /GitHub CLI/],
+  ['az repos pr create', /infrastructure/],
+  ['acli jira workitem transition --key X-1', /Atlassian CLI/],
   ['curl https://example.com', /network/],
   ['node -e "fetch(\'https://x\')"', /inline code/],
   ['npm publish', /registry/],

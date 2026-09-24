@@ -1,7 +1,7 @@
+import { createBoardSource } from '../board/board.factory.js';
 import { BoardStore } from '../board/board.store.js';
 import { BoardSync } from '../board/board.sync.js';
 import { BoardWriter } from '../board/board.writer.js';
-import { TrelloSource } from '../board/trello/trello.source.js';
 import { loadConfig } from '../config/config.loader.js';
 import { roleSchema } from '../config/config.schema.js';
 import { resolveBoardCredentials } from '../config/credentials.js';
@@ -9,8 +9,9 @@ import { loadOrchestratorEnv } from '../config/env.js';
 import { SqliteStore } from '../db/sqlite.store.js';
 import type { TaskId } from '../domain/ids.js';
 import type { ProposedSummary } from '../mcp/board.schemas.js';
-import { PrPublisher } from '../pipeline/pr.publisher.js';
+import { createPrHost, linkedWorkItems } from '../pipeline/pr.host.js';
 import { buildBoardComment, buildPrBody, type ReportInput } from '../pipeline/report.builder.js';
+import { gitAuthEnv } from '../workspace/git.auth.js';
 import { GitCli } from '../workspace/git.cli.js';
 
 /**
@@ -37,7 +38,12 @@ export async function republish(taskIdArg: string): Promise<number> {
 
     const git = new GitCli();
     if (
-!(await git.remoteBranchExists(project.repo.path, project.repo.remote, task.branch))
+      !(await git.remoteBranchExists(
+        project.repo.path,
+        project.repo.remote,
+        task.branch,
+        gitAuthEnv(project),
+      ))
     ) {
       throw new Error(
         `branch ${task.branch} is not on ${project.repo.remote} — run the task again instead`,
@@ -95,15 +101,15 @@ export async function republish(taskIdArg: string): Promise<number> {
     };
 
     log(`opening draft PR for ${task.branch}`);
-    const prUrl = await new PrPublisher().createDraft({
+    const prUrl = await createPrHost(project, log).createDraft({
       cwd: project.repo.path,
-      githubRepo: project.repo.githubRepo,
       base: project.repo.baseBranch,
       head: task.branch,
       title: `[${task.card_short_id}] ${summary.title}`.slice(0, 200),
       body: buildPrBody(report),
       draft: project.pr.draft,
       labels: project.pr.labels,
+      workItemIds: linkedWorkItems(project, task.card_short_id),
     });
     log(`PR: ${prUrl}`);
 
@@ -118,10 +124,10 @@ export async function republish(taskIdArg: string): Promise<number> {
     const comment = buildBoardComment({ ...report, prUrl });
     boardStore.saveReport(task.id, 'review', comment);
 
-    if (project.board.provider === 'trello' && !task.card_id.startsWith('local:')) {
+    if (!task.card_id.startsWith('local:')) {
       const cred = resolveBoardCredentials(loaded.credentialRefs).get(project.board.credentials);
       if (!cred) throw new Error('credentials unresolved');
-      const source = new TrelloSource(project.board.boardId, cred);
+      const source = createBoardSource(project, cred);
       const sync = new BoardSync(project, source, store, boardStore, { info: log, warn: log });
       const writer = new BoardWriter(project, source, boardStore, sync.router, {
         info: log,

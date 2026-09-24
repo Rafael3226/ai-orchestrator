@@ -117,3 +117,74 @@ projects:
       onSuccess: { move: review, comment: report }
       onFailure: { move: blocked, comment: report, addLabel: ai-failed }
       onBlocked: { move: blocked, comment: report, addLabel: needs-human }
+
+  # ── Azure DevOps: work items on the board, pull requests in Azure Repos ──
+  # A card is a work item; its column is the work item State. `whoami
+  # --provider azure-devops --cred ADO_MAIN contoso` prints botMemberId, and
+  # `init-board contoso/Web --provider azure-devops --cred ADO_MAIN` prints a
+  # `columns:` block for the states the project already has.
+  #
+  # - id: web-shop
+  #   name: Web Shop
+  #   repo:
+  #     path: D:\Repos\contoso\web-shop
+  #     worktreeRoot: D:\aow\web-shop
+  #     host:
+  #       provider: azure-devops
+  #       organization: contoso
+  #       project: Web
+  #       repository: web-shop
+  #       credentials: ADO_MAIN # ADO_MAIN_PAT: Work Items + Code, read & write
+  #   board:
+  #     provider: azure-devops
+  #     organization: contoso
+  #     project: Web
+  #     workItemTypes: [User Story, Bug]
+  #     # areaPath: Web\Team A
+  #     credentials: ADO_MAIN
+  #     botMemberId: '<identity id from `orchestrator whoami`>'
+  #     columns:
+  #       ready: Ready
+  #       inProgress: Active
+  #       review: Resolved
+  #       blocked: Blocked # a custom state; the Agile template has none
+  #   agents: { DEV-BE: { enabled: true } }
+  #   routes:
+  #     - when: { column: Ready, label: be }
+  #       agent: DEV-BE
+  #   writeback:
+  #     onStart: { move: inProgress, assign: bot, comment: started }
+  #     onSuccess: { move: review, comment: report }
+  #     onFailure: { move: blocked, comment: report, addLabel: ai-failed }
+
+  # ── Jira Cloud: issues on the board, pull requests on GitHub ─────────────
+  # A card is an issue; its column is the issue status, and a move runs the
+  # workflow transition that reaches it. Jira labels cannot contain spaces.
+  #
+  # - id: api
+  #   name: API
+  #   repo:
+  #     path: D:\Repos\acme\api
+  #     worktreeRoot: D:\aow\api
+  #     githubRepo: acme/api
+  #   board:
+  #     provider: jira
+  #     site: acme # or acme.atlassian.net
+  #     projectKey: API
+  #     # issueTypes: [Story, Bug]
+  #     # jql: component = Backend
+  #     credentials: JIRA_MAIN
+  #     botMemberId: '<accountId from `orchestrator whoami`>'
+  #     columns:
+  #       ready: Selected for Development
+  #       inProgress: In Progress
+  #       review: In Review
+  #       blocked: Blocked
+  #   agents: { DEV-BE: { enabled: true } }
+  #   routes:
+  #     - when: { column: Selected for Development }
+  #       agent: DEV-BE
+  #   writeback:
+  #     onStart: { move: inProgress, assign: bot, comment: started }
+  #     onSuccess: { move: review, comment: report }
+  #     onFailure: { move: blocked, comment: report, addLabel: ai-failed }

@@ -143,11 +143,17 @@ export class GitPublisher {
     return { sha, hooksBypassed };
   }
 
-  async push(cwd: string, remote: string, branch: string): Promise<void> {
+  /** `env` carries per-host auth (see git.auth); `authHint` is what to tell a human on a 401. */
+  async push(
+    cwd: string,
+    remote: string,
+    branch: string,
+    opts: { env?: Readonly<Record<string, string>>; authHint?: string } = {},
+  ): Promise<void> {
     const r = await runCommand('git', ['push', '-u', remote, branch], {
       cwd,
       timeoutMs: 3 * 60_000,
-      env: { GIT_TERMINAL_PROMPT: '0' },
+      env: { ...opts.env, GIT_TERMINAL_PROMPT: '0' },
     });
     if (r.exitCode === 0) return;
     const out = r.output;
@@ -160,7 +166,7 @@ export class GitPublisher {
     if (/authentication|could not read Username|Permission denied|403/i.test(out)) {
       throw new PublishAbort(
         'auth',
-        `git push authentication failed — run \`gh auth setup-git\`\n${out.slice(-1000)}`,
+        `git push authentication failed — ${opts.authHint ?? 'run `gh auth setup-git`'}\n${out.slice(-1000)}`,
       );
     }
     throw new Error(`git push failed:\n${out.slice(-3000)}`);

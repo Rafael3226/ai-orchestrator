@@ -2,9 +2,13 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { createBoardSource } from '../board/board.factory.js';
+import { findColumnByName } from '../board/board.types.js';
 import { loadConfig, type LoadedConfig } from '../config/config.loader.js';
 import { resolveBoardCredentials } from '../config/credentials.js';
 import { loadOrchestratorEnv, type OrchestratorEnv } from '../config/env.js';
+import { AzureReposPrHost } from '../pipeline/azure.repos.js';
+import { createPrHost } from '../pipeline/pr.host.js';
 
 type Status = 'ok' | 'warn' | 'fail';
 interface Check {
@@ -122,12 +126,12 @@ function configChecks(env: OrchestratorEnv): Check[] {
   try {
     resolveBoardCredentials(loaded.credentialRefs);
     out.push({
-      name: 'board credentials',
+      name: 'credentials',
       status: 'ok',
       detail: [...loaded.credentialRefs.keys()].join(', '),
     });
   } catch (e) {
-    out.push({ name: 'board credentials', status: 'fail', detail: (e as Error).message });
+    out.push({ name: 'credentials', status: 'fail', detail: (e as Error).message });
   }
 
   for (const p of loaded.config.projects) {
@@ -160,7 +164,75 @@ function configChecks(env: OrchestratorEnv): Check[] {
         });
       }
     }
-    out.push(prLabelsCheck(p.repo.githubRepo, p.pr.labels));
+    if (p.repo.host.provider === 'github')
+      out.push(prLabelsCheck(p.repo.host.githubRepo, p.pr.labels));
+  }
+  return out;
+}
+
+/**
+ * Live calls with the configured credentials: every board answers, its token
+ * is the configured bot (or the loop guard refuses to boot), every column
+ * alias resolves, and every Azure Repos repository and base branch is there.
+ */
+async function connectivityChecks(loaded: LoadedConfig): Promise<Check[]> {
+  const out: Check[] = [];
+  let creds;
+  try {
+    creds = resolveBoardCredentials(loaded.credentialRefs);
+  } catch {
+    return out; // configChecks already reported the missing variables.
+  }
+  for (const p of loaded.config.projects.filter((x) => x.enabled)) {
+    const name = `board ${p.id}`;
+    const cred = creds.get(p.board.credentials);
+    if (!cred) continue;
+    try {
+      const source = createBoardSource(p, cred);
+      const [me, topology] = await Promise.all([source.whoAmI(), source.describe()]);
+      const botOk = !p.board.botMemberId || p.board.botMemberId === me.id;
+      out.push({
+        name,
+        status: botOk ? 'ok' : 'fail',
+        detail: botOk
+          ? `${p.board.provider} ${topology.name}, as ${me.username}`
+          : `botMemberId is "${p.board.botMemberId}" but ${p.board.credentials} is ${me.username} (${me.id})`,
+      });
+      const missing = Object.entries(p.board.columns).filter(
+        ([, column]) => !findColumnByName(topology, column),
+      );
+      out.push({
+        name: '  columns',
+        status: missing.length ? 'fail' : 'ok',
+        detail: missing.length
+          ? `not on the board: ${missing.map(([a, c]) => `${a} → "${c}"`).join(', ')} ` +
+            `(it has: ${topology.columns.map((c) => c.name).join(', ')})`
+          : `${Object.keys(p.board.columns).length} alias(es) resolve`,
+      });
+    } catch (e) {
+      out.push({ name, status: 'fail', detail: (e as Error).message });
+    }
+
+    const host = p.repo.host;
+    if (host.provider === 'azure-devops') {
+      const repoName = `  azure repos ${host.repository}`;
+      try {
+        const prHost = createPrHost(p);
+        const access =
+          prHost instanceof AzureReposPrHost
+            ? await prHost.checkAccess(p.repo.baseBranch)
+            : { baseExists: true };
+        out.push({
+          name: repoName,
+          status: access.baseExists ? 'ok' : 'fail',
+          detail: access.baseExists
+            ? `${host.organization}/${host.project}, base ${p.repo.baseBranch} exists`
+            : `base branch ${p.repo.baseBranch} is not on the repository`,
+        });
+      } catch (e) {
+        out.push({ name: repoName, status: 'fail', detail: (e as Error).message });
+      }
+    }
   }
   return out;
 }
@@ -372,14 +444,24 @@ async function dockerChecks(env: OrchestratorEnv, loaded: LoadedConfig): Promise
   return out;
 }
 
+/** `gh` is only needed when some project opens pull requests on GitHub. */
+function usesGithub(env: OrchestratorEnv | undefined): boolean {
+  if (!env) return true;
+  try {
+    return loadConfig(resolve(env.ORCHESTRATOR_CONFIG)).config.projects.some(
+      (p) => p.repo.host.provider === 'github',
+    );
+  } catch {
+    return true; // cannot tell; keep the checks
+  }
+}
+
 export async function runDoctor(): Promise<number> {
   const checks: Check[] = [
     tool('node', ['--version'], '22.0.0'),
     tool('pnpm', ['--version'], '10.0.0'),
     tool('git', ['--version'], '2.40.0'),
-    tool('gh', ['--version'], '2.40.0'),
     tool('claude', ['--version'], '2.1.0'),
-    ghAuth(),
   ];
 
   let env: OrchestratorEnv | undefined;
@@ -393,10 +475,12 @@ export async function runDoctor(): Promise<number> {
   } catch (e) {
     checks.push({ name: 'env', status: 'fail', detail: (e as Error).message });
   }
+  if (usesGithub(env)) checks.push(tool('gh', ['--version'], '2.40.0'), ghAuth());
   if (env) {
     checks.push(...envCheck(env), ...configChecks(env));
     try {
       const loaded = loadConfig(resolve(env.ORCHESTRATOR_CONFIG));
+      checks.push(...(await connectivityChecks(loaded)));
       checks.push(...(await webhookChecks(env, loaded)));
       checks.push(...(await dockerChecks(env, loaded)));
     } catch {

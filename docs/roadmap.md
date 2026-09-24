@@ -8,7 +8,7 @@
 | 3     | Board integration: fake source, Trello client + poller, router, outbox, MCP | done   |
 | 4     | Office UI: Fastify + SSE + Vite canvas                                      | done   |
 | 5     | Breadth: remaining roles, Docker driver, webhooks                           | built  |
-| 6     | ADO / Jira board providers                                                  |        |
+| 6     | ADO / Jira boards, Azure Repos PRs (polling; see `docs/providers.md`)       | built  |
 
 **Milestone 1 — a real card to a real draft PR — is met.** Two `be` cards on the
 live board dispatched DEV-BE, verified, pushed and opened draft PRs without a

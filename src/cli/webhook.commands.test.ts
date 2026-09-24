@@ -130,6 +130,7 @@ describe('ensureWebhook', () => {
 
 describe('requireApiSecret', () => {
   const cred = (apiSecret?: string): BoardCredential => ({
+    kind: 'trello',
     ref: 'TRELLO_MAIN',
     apiKey: 'k',
     token: 't',

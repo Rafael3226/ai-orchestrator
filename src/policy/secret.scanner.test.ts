@@ -17,6 +17,21 @@ describe('scanDiffForSecrets', () => {
     expect(hits[0]?.preview).not.toContain('a'.repeat(40));
   });
 
+  it('flags Azure DevOps PATs and Atlassian API tokens', () => {
+    const hits = scanDiffForSecrets(
+      diff([
+        `ADO_PAT=${'A1b2'.repeat(19)}AZDO${'x9Z0'}`,
+        `pat = ${'abcdefgh234567qr'.repeat(3)}wxyz`,
+        `JIRA_TOKEN=ATATT3${'xFfGF0a_B-c='.repeat(10)}`,
+      ]),
+    );
+    expect(hits.map((h) => h.kind)).toEqual([
+      'azure-devops-pat',
+      'azure-devops-pat-legacy',
+      'atlassian-api-token',
+    ]);
+  });
+
   it('ignores removed lines and placeholders', () => {
     const text = [
       '--- a/x',

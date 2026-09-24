@@ -110,6 +110,7 @@ const HARD_DENY: readonly { re: RegExp; why: string }[] = [
   { re: /\bgit\s+clean\b/i, why: 'git clean could delete untracked work' },
   { re: /\bgit\s+filter-(branch|repo)\b/i, why: 'history rewriting' },
   { re: /\bgh\b/i, why: 'GitHub CLI is orchestrator-only' },
+  { re: /\bacli\b/i, why: 'the Atlassian CLI is orchestrator-only' },
   { re: /\b(curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp|telnet)\b/i, why: 'no network tools' },
   {
     re: /\b(docker|podman|kubectl|helm|terraform|aws|az|gcloud)\b/i,
