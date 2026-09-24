@@ -7,6 +7,7 @@ import { SqliteStore } from '../db/sqlite.store.js';
 import { LocalDriver } from '../exec/local.driver.js';
 import { Orchestrator, type OrchestratorLogger } from '../scheduler/orchestrator.js';
 import { OfficeServer } from '../server/http.server.js';
+import { WebhookServer } from '../server/webhook.server.js';
 
 const stamp = () => new Date().toISOString().slice(11, 19);
 const logger: OrchestratorLogger = {
@@ -30,15 +31,50 @@ function waitForSignal(onStop: () => Promise<void>): Promise<number> {
   });
 }
 
-/** `start`: daemon + office server. */
-export async function startDaemon(opts: { noServer?: boolean } = {}): Promise<number> {
+/** `start`: daemon + office server + webhook receiver. */
+export async function startDaemon(
+  opts: { noServer?: boolean; noWebhook?: boolean } = {},
+): Promise<number> {
   const env = loadOrchestratorEnv();
   const loaded = loadConfig(env.ORCHESTRATOR_CONFIG);
   for (const d of loaded.diagnostics) logger.warn(`config: ${d.projectId ?? '-'}: ${d.message}`);
 
   const store = new SqliteStore(env.ORCHESTRATOR_DB);
   const boardStore = new BoardStore(store);
-  const orchestrator = new Orchestrator(loaded, store, new LocalDriver(), logger);
+
+  const wantsWebhooks =
+    !opts.noWebhook && loaded.config.projects.some((p) => p.enabled && p.board.webhook.enabled);
+  const pathSecret = env.ORCHESTRATOR_WEBHOOK_PATH_SECRET;
+  if (wantsWebhooks && !pathSecret) {
+    throw new Error(
+      'webhooks are enabled but ORCHESTRATOR_WEBHOOK_PATH_SECRET is not set — ' +
+        'pick any unguessable string; it becomes part of the public callback URL',
+    );
+  }
+  const webhookServer =
+    wantsWebhooks && pathSecret
+      ? new WebhookServer({
+          host: env.ORCHESTRATOR_WEBHOOK_HOST,
+          port: env.ORCHESTRATOR_WEBHOOK_PORT,
+          pathPrefix: env.ORCHESTRATOR_WEBHOOK_PATH_PREFIX,
+          pathSecret,
+          log: logger.info,
+        })
+      : null;
+
+  const orchestrator = new Orchestrator(
+    loaded,
+    store,
+    new LocalDriver(),
+    logger,
+    undefined,
+    webhookServer,
+    {
+      publicUrl: env.ORCHESTRATOR_WEBHOOK_PUBLIC_URL,
+      pathPrefix: env.ORCHESTRATOR_WEBHOOK_PATH_PREFIX,
+      pathSecret: pathSecret ?? 'none',
+    },
+  );
   const server = opts.noServer
     ? null
     : new OfficeServer(loaded, store, boardStore, {

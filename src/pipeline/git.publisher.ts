@@ -44,7 +44,16 @@ export class GitPublisher {
   private readonly git = new GitCli();
 
   /** Stage everything (gitignore respected), refuse oversized or secret-bearing diffs. */
-  async stageAndInspect(cwd: string, copiedIncludes: readonly string[]): Promise<DiffStat> {
+  /**
+   * `allowEmpty` is for roles whose empty diff is a legitimate success — QA
+   * reviewing a branch and finding nothing to change. For everyone else an
+   * empty diff still aborts, because it means the agent did nothing.
+   */
+  async stageAndInspect(
+    cwd: string,
+    copiedIncludes: readonly string[],
+    opts: { allowEmpty?: boolean } = {},
+  ): Promise<DiffStat> {
     await this.git.run(cwd, ['add', '-A']);
     const numstat = await this.git.run(cwd, ['diff', '--cached', '--numstat', '-M']);
     const statText = await this.git.run(cwd, ['diff', '--cached', '--stat', '-M']);
@@ -60,8 +69,10 @@ export class GitPublisher {
     }
     const stat: DiffStat = { files: paths.length, insertions, deletions, paths, statText };
 
-    if (stat.files === 0)
+    if (stat.files === 0) {
+      if (opts.allowEmpty) return stat;
       throw new PublishAbort('nothing-to-commit', 'the agent produced no changes');
+    }
     if (stat.files > MAX_FILES || insertions + deletions > MAX_LINES) {
       throw new PublishAbort(
         'diff-too-large',

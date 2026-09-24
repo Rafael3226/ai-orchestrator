@@ -6,12 +6,16 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 
 import { checkBash } from './bash.guard.js';
-import { checkRead, checkWrite } from './path.guard.js';
+import { checkRead, checkWrite, type PathMode } from './path.guard.js';
 
 export interface GuardContext {
   /** The worktree. Every write must resolve inside it. */
   readonly root: string;
   readonly additionalReadRoots?: readonly string[];
+  /** Repo-relative globs this role may write. Empty/absent = the whole worktree. */
+  readonly writeGlobs?: readonly string[];
+  /** `posix` when the agent runs in a container and `root` is a container path. */
+  readonly mode?: PathMode;
   readonly onDenial?: (toolName: string, reason: string, input: unknown) => void;
 }
 
@@ -47,19 +51,19 @@ export function buildGuardHooks(
       case 'Write':
       case 'Edit':
       case 'MultiEdit': {
-        const r = checkWrite(ctx.root, str('file_path'));
+        const r = checkWrite(ctx.root, str('file_path'), ctx.writeGlobs ?? [], ctx.mode);
         return r.ok ? decide('allow', 'inside worktree') : reject(r.reason);
       }
       case 'NotebookEdit': {
-        const r = checkWrite(ctx.root, str('notebook_path'));
+        const r = checkWrite(ctx.root, str('notebook_path'), ctx.writeGlobs ?? [], ctx.mode);
         return r.ok ? decide('allow', 'inside worktree') : reject(r.reason);
       }
       case 'Read': {
-        const r = checkRead(ctx.root, str('file_path'), ctx.additionalReadRoots ?? []);
+        const r = checkRead(ctx.root, str('file_path'), ctx.additionalReadRoots ?? [], ctx.mode);
         return r.ok ? decide('allow', 'inside worktree') : reject(r.reason);
       }
       case 'Bash': {
-        const r = checkBash(ctx.root, str('command'));
+        const r = checkBash(ctx.root, str('command'), ctx.mode);
         return r.ok ? decide('allow', 'allowed command') : reject(r.reason);
       }
       default:

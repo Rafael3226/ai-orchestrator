@@ -14,6 +14,27 @@ export interface BoardCapabilities {
   readonly canAddLabel: boolean;
   /** Trello: false — labels must pre-exist on the board. */
   readonly labelsAreFreeform: boolean;
+  /** The provider can register a push callback; see WebhookRegistrar. */
+  readonly canRegisterWebhook: boolean;
+}
+
+export interface RegisteredWebhook {
+  readonly id: string;
+  readonly idModel: string;
+  readonly callbackURL: string;
+  readonly description: string;
+  readonly active: boolean;
+}
+
+/**
+ * Implemented by sources that can manage their own push registration. Kept off
+ * BoardSource so a provider without webhooks is not forced to stub four methods.
+ */
+export interface WebhookRegistrar {
+  listWebhooks(): Promise<readonly RegisteredWebhook[]>;
+  createWebhook(callbackURL: string, description: string): Promise<RegisteredWebhook>;
+  updateWebhook(id: string, callbackURL: string): Promise<RegisteredWebhook>;
+  deleteWebhook(id: string): Promise<void>;
 }
 
 export interface BoardPollResult {

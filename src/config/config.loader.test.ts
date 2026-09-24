@@ -98,6 +98,116 @@ describe('loadConfigFromString', () => {
     expect(loaded.diagnostics.map((d) => d.code)).toContain('route-shadowed');
   });
 
+  it('defaults board.webhook to off when the key is absent', () => {
+    // `board` is a strictObject, so every pre-webhook config and fixture omits
+    // this key entirely — it has to keep loading.
+    const w = loadConfigFromString(minimal(), 'x.yaml').project('demo').board.webhook;
+    expect(w).toMatchObject({
+      enabled: false,
+      manageRegistration: true,
+      deleteOnShutdown: false,
+      maxBufferedEvents: 500,
+      maxEventAgeSeconds: 600,
+    });
+  });
+
+  /** A project whose board block carries extra keys, built as real YAML. */
+  const withBoard = (extra: string, provider = 'trello') =>
+    `
+version: 1
+projects:
+  - id: demo
+    name: Demo
+    repo: { path: /repo, worktreeRoot: /wt, githubRepo: me/demo }
+    board:
+      provider: ${provider}
+      boardId: b1
+      credentials: TRELLO_X
+      botMemberId: m1
+      columns: { ready: Ready, review: Review }
+${extra}
+    agents: { DEV-BE: { enabled: true } }
+    routes:
+      - when: { list: Ready }
+        agent: DEV-BE
+`;
+
+  it('rejects webhooks on a provider that does not implement them', () => {
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((m: unknown) => void errors.push(String(m)));
+    expect(() =>
+      loadConfigFromString(withBoard('      webhook: { enabled: true }', 'jira'), 'x.yaml'),
+    ).toThrow(/Invalid config/);
+    expect(errors.join(' ')).toMatch(/only implemented for trello/);
+  });
+
+  it('warns, without failing, when webhooks are on and polling is still aggressive', () => {
+    const loaded = loadConfigFromString(
+      withBoard(`      poll: { intervalSeconds: 15 }
+      webhook: { enabled: true }`),
+      'x.yaml',
+    );
+    expect(loaded.diagnostics.map((d) => d.code)).toContain('webhook-redundant-polling');
+    expect(loaded.project('demo').board.webhook.enabled).toBe(true);
+  });
+
+  it('does not warn about polling at the recommended webhook profile', () => {
+    const loaded = loadConfigFromString(
+      withBoard(`      poll: { intervalSeconds: 120, reconcileEveryTicks: 5 }
+      webhook: { enabled: true }`),
+      'x.yaml',
+    );
+    expect(loaded.diagnostics.map((d) => d.code)).not.toContain('webhook-redundant-polling');
+  });
+
+  it('defaults exec to the local driver', () => {
+    const p = loadConfigFromString(minimal(), 'x.yaml').project('demo');
+    expect(p.agents['DEV-BE'].exec.driver).toBe('local');
+    expect(p.agents['DEV-BE'].exec.docker.image).toBe('ai-orchestrator/agent:latest');
+  });
+
+  it('merges exec across defaults, project and role, narrowest last', () => {
+    const yaml = `
+version: 1
+defaults:
+  exec:
+    driver: local
+    docker: { image: base:1, memoryMb: 2048, cpus: 1 }
+projects:
+  - id: demo
+    name: Demo
+    repo: { path: /repo, worktreeRoot: /wt, githubRepo: me/demo }
+    board: { provider: trello, boardId: b1, credentials: TRELLO_X, columns: { ready: Ready } }
+    exec:
+      driver: docker
+      docker: { memoryMb: 8192 }
+    agents:
+      DEV-BE: { enabled: true }
+      DEV-FE: { enabled: true, docker: { image: fe:2 } }
+    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+`;
+    const p = loadConfigFromString(yaml, 'x.yaml').project('demo');
+
+    // Project overrides the default driver...
+    expect(p.agents['DEV-BE'].exec.driver).toBe('docker');
+    // ...project memory wins over the default...
+    expect(p.agents['DEV-BE'].exec.docker.memoryMb).toBe(8192);
+    // ...the default image survives where nothing overrode it...
+    expect(p.agents['DEV-BE'].exec.docker.image).toBe('base:1');
+    // ...and the role's image is narrower still, without erasing its siblings.
+    expect(p.agents['DEV-FE'].exec.docker).toMatchObject({
+      image: 'fe:2',
+      memoryMb: 8192,
+      cpus: 1,
+    });
+  });
+
+  it('rejects an unknown key inside the docker block', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const bad = minimal(`    exec: { driver: docker, docker: { memoryMB: 4096 } }`);
+    expect(() => loadConfigFromString(bad, 'x.yaml')).toThrow(/Invalid config/);
+  });
+
   it('applies priority as a stable reorder over file order', () => {
     const loaded = loadConfigFromString(
       minimal(`      - when: { list: Ready, label: be }
@@ -107,4 +217,5 @@ describe('loadConfigFromString', () => {
     );
     expect(loaded.project('demo').routes.map((r) => r.index)).toEqual([1, 0]);
   });
+
 });

@@ -24,6 +24,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
+    "test:docker": "node scripts/test-docker.mjs",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts"
   },

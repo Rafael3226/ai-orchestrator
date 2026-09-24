@@ -19,7 +19,7 @@ function credFor(ref: string): BoardCredential {
   const token = env[`${ref}_TOKEN`];
   if (!apiKey || !token)
     throw new Error(`missing ${ref}_API_KEY / ${ref}_TOKEN in the environment`);
-  return { ref, apiKey, token };
+  return { ref, apiKey, token, apiSecret: env[`${ref}_API_SECRET`] };
 }
 
 /** `orchestrator boards --cred TRELLO_MAIN` — discover board ids. */
@@ -72,6 +72,14 @@ export async function initBoard(name: string, ref: string): Promise<number> {
   return 0;
 }
 
+function ago(iso: string | null): string {
+  if (!iso) return 'never';
+  const secs = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  return `${Math.round(secs / 3600)}h ago`;
+}
+
 /** `orchestrator status` — queue and outbox counts from the local database. */
 export async function showStatus(): Promise<number> {
   const env = loadOrchestratorEnv();
@@ -91,6 +99,15 @@ export async function showStatus(): Promise<number> {
       console.log(
         `${p.id}${p.enabled ? '' : ' (disabled)'}: ${tasks.length} task(s) ${JSON.stringify(byState)} · cursor ${cursor.cursor ?? 'none'} · tick ${cursor.tick}`,
       );
+      if (p.board.webhook.enabled) {
+        const w = boardStore.getWebhookStats(p.id);
+        console.log(
+          w
+            ? `  webhook: ${w.registeredId ?? 'unregistered'} · last delivery ${ago(w.lastDeliveryAt)} · ` +
+                `${w.delivered} delivered / ${w.rejected} rejected / ${w.dropped} dropped`
+            : '  webhook: enabled, but nothing delivered yet',
+        );
+      }
       for (const t of tasks.filter((x) => !['review', 'cancelled'].includes(x.state)).slice(-10)) {
         console.log(
           `  [${t.card_short_id}] ${t.state.padEnd(11)} ${t.role.padEnd(6)} ${t.title.slice(0, 60)}${t.pr_url ? '  ' + t.pr_url : ''}`,

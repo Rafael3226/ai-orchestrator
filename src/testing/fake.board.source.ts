@@ -24,6 +24,7 @@ export class FakeBoardSource implements BoardSource {
     canAssignMember: true,
     canAddLabel: true,
     labelsAreFreeform: false,
+    canRegisterWebhook: false,
   };
 
   readonly columns: BoardColumn[];

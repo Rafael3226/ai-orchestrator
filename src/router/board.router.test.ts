@@ -5,6 +5,7 @@ import { BoardSync } from '../board/board.sync.js';
 import { BoardWriter } from '../board/board.writer.js';
 import { loadConfigFromString } from '../config/config.loader.js';
 import { SqliteStore } from '../db/sqlite.store.js';
+import { newTaskId, type TaskId } from '../domain/ids.js';
 import { FakeBoardSource } from '../testing/fake.board.source.js';
 
 const yaml = `
@@ -20,7 +21,15 @@ projects:
       botMemberId: bot
       poll: { reconcileEveryTicks: 3 }
       columns: { ready: Ready for Dev, inProgress: In Progress, review: In Review, blocked: Blocked }
-    agents: { DEV-BE: { enabled: true }, QA: { enabled: true }, DEV-FE: { enabled: false } }
+    agents:
+      DEV-BE: { enabled: true }
+      DEV-FE: { enabled: false }
+      QA:
+        enabled: true
+        # QA is routed on In Review, so its own success must not move the card
+        # back there — the loader rejects that as a dispatch loop.
+        writeback:
+          onSuccess: { comment: report }
     routes:
       - when: { list: Ready for Dev, label: be }
         agent: DEV-BE
@@ -160,5 +169,130 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     await writer.drain(await sync.getTopology());
     expect(board.comments.get(c.id)).toHaveLength(1);
     expect(boardStore.outboxCounts()).toEqual({ done: 3 });
+  });
+});
+
+/** Walk a freshly queued task to `review`, as the runner would. */
+const finish = (id: TaskId): void => {
+  for (const to of ['claimed', 'preparing', 'running', 'review'] as const) {
+    store.transitionTask(id, store.getTask(id).state, to);
+  }
+};
+
+describe('handoff: one role waking the next', () => {
+  it('dispatches QA on our own move, where a plain poll would call it an echo', async () => {
+    const c = board.addCard('20', 'Handoff me', 'Ready for Dev', { labels: ['be'] });
+    const first = await sync.tick();
+    expect(first.dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    const task = store.listTasks()[0]!;
+    // The runner lands the task before its writeback is ever enqueued, so the
+    // one-active-task-per-card index is satisfied by the time we hand off.
+    finish(task.id);
+
+    const project = loadConfigFromString(yaml, 'x').project('demo');
+    const handedOff: string[] = [];
+    const writer = new BoardWriter(project, board, boardStore, sync.router, quiet, {
+      onMoved: (cardId) => handedOff.push(cardId),
+    });
+    writer.enqueueStep(
+      'onSuccess',
+      project.agents['DEV-BE'].writeback.onSuccess,
+      task.id,
+      c.id,
+      'done report',
+    );
+    await writer.drain(await sync.getTopology());
+
+    // The writer told us our move landed...
+    expect(handedOff).toEqual([c.id]);
+    // ...and the handoff dispatches QA for the same card, unattended.
+    const dispatch = await sync.handoff(c.id);
+    expect(dispatch?.role).toBe('QA');
+
+    const roles = store.listTasks().map((t) => t.role);
+    expect(roles.sort()).toEqual(['DEV-BE', 'QA']);
+  });
+
+  it('is idempotent — a second handoff for the same card dispatches nothing', async () => {
+    const c = board.addCard('21', 'Once only', 'Ready for Dev', { labels: ['be'] });
+    await sync.tick();
+    finish(store.listTasks()[0]!.id);
+    const project = loadConfigFromString(yaml, 'x').project('demo');
+    const writer = new BoardWriter(project, board, boardStore, sync.router, quiet);
+    writer.enqueueStep(
+      'onSuccess',
+      project.agents['DEV-BE'].writeback.onSuccess,
+      store.listTasks()[0]!.id,
+      c.id,
+      'done',
+    );
+    await writer.drain(await sync.getTopology());
+
+    expect((await sync.handoff(c.id))?.role).toBe('QA');
+    expect(await sync.handoff(c.id)).toBeNull();
+    expect(store.listTasks()).toHaveLength(2);
+  });
+
+  it('still drops the same move when it arrives through an ordinary poll', async () => {
+    const c = board.addCard('22', 'No flag, no dispatch', 'Ready for Dev', { labels: ['be'] });
+    await sync.tick();
+    finish(store.listTasks()[0]!.id);
+    const project = loadConfigFromString(yaml, 'x').project('demo');
+    const writer = new BoardWriter(project, board, boardStore, sync.router, quiet);
+    writer.enqueueStep(
+      'onSuccess',
+      project.agents['DEV-BE'].writeback.onSuccess,
+      store.listTasks()[0]!.id,
+      c.id,
+      'done',
+    );
+    await writer.drain(await sync.getTopology());
+
+    // Without the handoff flag the echo guard still holds — this is the
+    // behaviour the handoff deliberately, and only locally, bypasses.
+    const r = await sync.tick();
+    expect(r.dispatched).toHaveLength(0);
+    expect(r.skipped.some((s) => s.reason === 'own writeback')).toBe(true);
+  });
+
+  it('does not hand off a card that lands in an unrouted column', async () => {
+    const c = board.addCard('23', 'Nowhere', 'Ready for Dev', { labels: ['be'] });
+    await sync.tick();
+    finish(store.listTasks()[0]!.id);
+    await board.moveCard(c.id, board.columnId('In Progress'));
+
+    expect(await sync.handoff(c.id)).toBeNull();
+  });
+});
+
+describe('circuit breaker scoping', () => {
+  it('counts dispatches per role, so a multi-role chain on one card is allowed', () => {
+    const c = board.addCard('30', 'Busy card', 'Ready for Dev', { labels: ['be'] });
+    const taskId = store.insertTask({
+      id: newTaskId(),
+      projectId: 'demo',
+      role: 'DEV-BE',
+      cardId: c.id,
+      cardShortId: c.shortId,
+      title: c.title,
+      spec: '',
+    }).id;
+    for (let i = 0; i < 4; i++) {
+      boardStore.insertLedger({
+        dedupeKey: `k-${i}`,
+        projectId: 'demo',
+        cardId: c.id,
+        role: 'DEV-BE',
+        routeId: 'demo/route-0',
+        taskId,
+      });
+    }
+
+    const hour = 60 * 60_000;
+    expect(boardStore.recentDispatchCount('demo', c.id, hour, 'DEV-BE')).toBe(4);
+    // QA is unaffected by DEV-BE burning through its budget.
+    expect(boardStore.recentDispatchCount('demo', c.id, hour, 'QA')).toBe(0);
+    // Unscoped still counts everything, for callers that want the total.
+    expect(boardStore.recentDispatchCount('demo', c.id, hour)).toBe(4);
   });
 });

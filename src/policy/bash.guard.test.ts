@@ -113,3 +113,31 @@ describe('checkBash', () => {
     expect(checkBash(root, 'cd /c/Windows && ls').ok).toBe(false);
   });
 });
+
+describe('checkBash in posix mode', () => {
+  const work = '/work';
+
+  it('allows a cd deeper into the container worktree', () => {
+    expect(checkBash(work, 'cd /work/packages/api && pnpm test', 'posix').ok).toBe(true);
+    expect(checkBash(work, 'cd packages/api', 'posix').ok).toBe(true);
+  });
+
+  it.each(['cd /', 'cd /etc', 'cd /gitcommon'])('denies %s', (cmd) =>
+    expect(checkBash(work, cmd, 'posix').ok).toBe(false),
+  );
+
+  it('does not apply the MSYS drive-letter rewrite to container paths', () => {
+    // The rewrite only fires on a single-letter first segment, so `/work` was
+    // never at risk — but a mount like `/w/src` would be turned into `W:\src`
+    // and then judged to be outside the root. In posix mode it is left alone.
+    expect(fromMsysPath('/w/src')).toBe('W:\\src');
+    expect(checkBash('/w', 'cd /w/src', 'posix').ok).toBe(true);
+    expect(checkBash('/w', 'cd /x/src', 'posix').ok).toBe(false);
+  });
+
+  it('keeps every other rule unchanged', () => {
+    expect(checkBash(work, 'git push origin main', 'posix').ok).toBe(false);
+    expect(checkBash(work, 'curl https://example.com', 'posix').ok).toBe(false);
+    expect(checkBash(work, 'git status', 'posix').ok).toBe(true);
+  });
+});

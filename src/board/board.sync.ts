@@ -49,7 +49,12 @@ export class BoardSync {
 
   /** Boot-time: the token's member must be the configured bot when we move cards. */
   async assertLoopGuard(): Promise<void> {
-    const moves = Object.values(this.project.writeback).some((s) => s.move !== undefined);
+    // Role overlays can introduce a move even when the project default has none.
+    const moves =
+      Object.values(this.project.writeback).some((s) => s.move !== undefined) ||
+      Object.values(this.project.agents).some((a) =>
+        Object.values(a.writeback).some((s) => s.move !== undefined),
+      );
     if (!moves) return;
     const me = await this.source.whoAmI();
     if (me.id !== this.project.board.botMemberId) {
@@ -96,7 +101,10 @@ export class BoardSync {
       }
     }
 
-    const reconcile = (state.tick + 1) % p.board.poll.reconcileEveryTicks === 0;
+    // A dropped delivery is recoverable, but only by looking at the board: force
+    // the reconcile rather than waiting up to reconcileEveryTicks for one.
+    const overflowed = this.consumeSourceOverflow();
+    const reconcile = overflowed || (state.tick + 1) % p.board.poll.reconcileEveryTicks === 0;
     this.boardStore.setCursor(p.id, result.cursor ?? state.cursor, reconcile);
     if (reconcile) {
       const r = await this.reconcile(topology);
@@ -104,6 +112,46 @@ export class BoardSync {
       skipped.push(...r.skipped);
     }
     return { events: result.events.length, dispatched, skipped, reconciled: reconcile };
+  }
+
+  /**
+   * Re-route one card after our own move settled, so a finished role can hand
+   * it to the next one. Without this the chain is impossible unattended: the
+   * move is dropped as an echo, and reconcile skips any card that already has a
+   * ledger row.
+   *
+   * The arrival is re-recorded first so the dedupe key differs from the one the
+   * previous dispatch used; that plus the per-role circuit breaker is what stops
+   * this from looping.
+   */
+  async handoff(cardId: string): Promise<Dispatch | null> {
+    const topology = await this.getTopology();
+    const card = await this.safeGetCard(cardId);
+    if (!card || card.closed) return null;
+
+    const ev = syntheticArrival(this.project, card, topology, { handoff: true });
+    if (!ev) return null;
+
+    // A card may only have one task in flight. In the normal flow the previous
+    // role is already terminal by the time its move settles, so this only fires
+    // when something is genuinely still running on the card.
+    if (this.store.hasActiveTaskForCard(this.project.id, card.id)) {
+      this.log.warn(
+        `${this.project.id}: handoff for [${card.shortId}] skipped — a task is still in flight`,
+      );
+      return null;
+    }
+
+    this.boardStore.recordArrival(this.project.id, card.id, card.columnId);
+    if (!this.boardStore.markEventSeen(this.project.id, ev.eventId)) return null;
+
+    const decision = this.router.route(ev, topology, card);
+    if (decision.kind !== 'dispatch') return null;
+    this.enqueue(decision.dispatch);
+    this.log.info(
+      `${this.project.id}: handoff — ${decision.dispatch.role} picked up [${card.shortId}] after our move`,
+    );
+    return decision.dispatch;
   }
 
   /** Emit synthetic arrivals for cards in routed columns with no ledger entry at all. */
@@ -159,6 +207,12 @@ export class BoardSync {
       );
       return taskId;
     });
+  }
+
+  /** True when a webhook buffer under us dropped events since the last tick. */
+  private consumeSourceOverflow(): boolean {
+    const source = this.source as { consumeOverflow?: () => boolean };
+    return source.consumeOverflow?.() ?? false;
   }
 
   private async safeGetCard(cardId: string): Promise<BoardCard | null> {

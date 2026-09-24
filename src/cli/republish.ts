@@ -3,6 +3,7 @@ import { BoardSync } from '../board/board.sync.js';
 import { BoardWriter } from '../board/board.writer.js';
 import { TrelloSource } from '../board/trello/trello.source.js';
 import { loadConfig } from '../config/config.loader.js';
+import { roleSchema } from '../config/config.schema.js';
 import { resolveBoardCredentials } from '../config/credentials.js';
 import { loadOrchestratorEnv } from '../config/env.js';
 import { SqliteStore } from '../db/sqlite.store.js';
@@ -35,7 +36,9 @@ export async function republish(taskIdArg: string): Promise<number> {
     const summary = JSON.parse(run.summary_json) as ProposedSummary;
 
     const git = new GitCli();
-    if (!(await git.remoteBranchExists(project.repo.path, project.repo.remote, task.branch))) {
+    if (
+!(await git.remoteBranchExists(project.repo.path, project.repo.remote, task.branch))
+    ) {
       throw new Error(
         `branch ${task.branch} is not on ${project.repo.remote} — run the task again instead`,
       );
@@ -124,15 +127,16 @@ export async function republish(taskIdArg: string): Promise<number> {
         info: log,
         warn: log,
       });
+      const writeback = project.agents[roleSchema.parse(task.role)].writeback;
       // A fresh idempotency namespace so the earlier onFailure rows do not shadow these.
       writer.enqueueStep(
         'onSuccess',
-        project.writeback.onSuccess,
+        writeback.onSuccess,
         `${task.id}:republish` as TaskId,
         task.card_id,
         comment,
       );
-      for (const label of toList(project.writeback.onFailure.addLabel)) {
+      for (const label of toList(writeback.onFailure.addLabel)) {
         boardStore.enqueue({
           projectId: project.id,
           taskId: task.id,

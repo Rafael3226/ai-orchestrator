@@ -1,6 +1,7 @@
 import type { ProjectConfig } from '../config/config.loader.js';
 import type { ExecResult } from '../exec/exec.driver.js';
 import type { BlockedReport, Decision, ProposedSummary } from '../mcp/board.schemas.js';
+import type { DeliveryPolicy } from '../policy/delivery.policy.js';
 import type { WorkspaceHandle } from '../workspace/worktree.manager.js';
 
 import { type DiffStat, GitPublisher, PublishAbort } from './git.publisher.js';
@@ -24,36 +25,69 @@ export interface PublishInput {
   readonly log: (msg: string) => void;
   /** Push and open a PR even though verification failed (WIP for a human). */
   readonly wip?: boolean;
+  /** The acting role's contract; `diff: 'optional'` is what allows an empty diff. */
+  readonly delivery: DeliveryPolicy;
 }
 
-export interface PublishOutput {
-  readonly diff: DiffStat;
-  readonly sha: string;
-  readonly prUrl: string;
-  readonly hooksBypassed: boolean;
+/**
+ * Both members carry every field, so the caller can keep destructuring without
+ * narrowing first; `kind` is there for the callers that do care.
+ */
+export type PublishOutput =
+  | {
+      readonly kind: 'pull-request';
+      readonly diff: DiffStat;
+      readonly sha: string;
+      readonly prUrl: string;
+      readonly hooksBypassed: boolean;
+    }
+  | {
+      readonly kind: 'board-only';
+      readonly diff: null;
+      readonly sha: null;
+      readonly prUrl: null;
+      readonly hooksBypassed: false;
+    };
+
+/** Seams for tests: publishing otherwise needs a real remote and a real `gh`. */
+export interface PublishDeps {
+  readonly git?: GitPublisher;
+  readonly pr?: PrPublisher;
 }
 
 /**
  * verify (done by caller) → stage+scan → commit → push → draft PR.
  * Every step is idempotent so a crash mid-way can be resumed by re-running.
  */
-export async function publish(input: PublishInput): Promise<PublishOutput> {
-  const git = new GitPublisher();
+export async function publish(input: PublishInput, deps: PublishDeps = {}): Promise<PublishOutput> {
   const { project, workspace, log } = input;
-  const pr = new PrPublisher((m) => log(`⚠ ${m}`));
+  const git = deps.git ?? new GitPublisher();
+  const pr = deps.pr ?? new PrPublisher((m) => log(`⚠ ${m}`));
+  const allowEmpty = input.delivery.diff === 'optional';
 
   log('stage + scan diff');
-  const diff = await git.stageAndInspect(workspace.path, workspace.copiedIncludes);
+  const diff = await git.stageAndInspect(workspace.path, workspace.copiedIncludes, { allowEmpty });
   log(`diff: ${diff.files} files, +${diff.insertions} −${diff.deletions}`);
+
+  if (diff.files === 0) {
+    // Only reachable when allowEmpty let it through: the role reviewed rather
+    // than changed anything. Nothing is committed, nothing is pushed, and the
+    // report goes to the board instead of a PR.
+    log('no changes — finishing without a commit');
+    return { kind: 'board-only', diff: null, sha: null, prUrl: null, hooksBypassed: false };
+  }
+
+  if (!input.summary.commit) {
+    throw new PublishAbort('nothing-to-commit', 'a diff was produced but no commit was proposed');
+  }
+  const commit = input.summary.commit;
 
   const trailers = [
     input.cardUrl ? `Refs: ${input.cardUrl}` : `Refs: card ${input.cardShortId}`,
     'Co-Authored-By: Claude <noreply@anthropic.com>',
   ];
   const message = git.renderCommitMessage(
-    input.wip
-      ? { ...input.summary.commit, subject: `wip: ${input.summary.commit.subject}`.slice(0, 72) }
-      : input.summary.commit,
+    input.wip ? { ...commit, subject: `wip: ${commit.subject}`.slice(0, 72) } : commit,
     trailers,
   );
   log('commit');
@@ -98,7 +132,7 @@ export async function publish(input: PublishInput): Promise<PublishOutput> {
     labels: input.wip ? [...project.pr.labels, 'ai-needs-human'] : project.pr.labels,
   });
   log(`PR: ${prUrl}`);
-  return { diff, sha, prUrl, hooksBypassed };
+  return { kind: 'pull-request', diff, sha, prUrl, hooksBypassed };
 }
 
 export { PublishAbort };

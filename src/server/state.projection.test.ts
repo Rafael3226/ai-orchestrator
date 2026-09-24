@@ -39,6 +39,24 @@ describe('StateProjector', () => {
     expect(s.agents.find((a) => a.key === 'pa:QA')!.status).toBe('offline');
   });
 
+  it('seats all five roles at distinct desks once they are enabled', () => {
+    // Enabling four more roles is config only — the canvas needs no code.
+    const allFive = yaml.replace(
+      'agents: { DEV-BE: { enabled: true } }',
+      'agents: { DEV-BE: { enabled: true }, DEV-FE: { enabled: true }, QA: { enabled: true }, PM: { enabled: true }, DEVOPS: { enabled: true } }',
+    );
+    const store = new SqliteStore(':memory:');
+    const p = new StateProjector(loadConfigFromString(allFive, 'x'), store, new BoardStore(store));
+
+    const mine = p.snapshot(1).agents.filter((a) => a.key.startsWith('pa:'));
+
+    expect(mine).toHaveLength(5);
+    expect(mine.every((a) => a.status === 'idle')).toBe(true);
+    const desks = new Set(mine.map((a) => `${a.desk.x},${a.desk.y}`));
+    expect(desks.size).toBe(5);
+    store.close();
+  });
+
   it('derives typing vs thinking from recent tool events and exposes the run pill', () => {
     const store = new SqliteStore(':memory:');
     const p = new StateProjector(loadConfigFromString(yaml, 'x'), store, new BoardStore(store));

@@ -2,8 +2,9 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { dockerConfigSchema } from '../config/config.schema.js';
 import { newRunId } from '../domain/ids.js';
-import { LocalDriver } from '../exec/local.driver.js';
+import { createDriver } from '../exec/driver.factory.js';
 import { buildGuardHooks } from '../policy/pretooluse.hook.js';
 import { AGENT_ENV } from '../policy/tool.policy.js';
 
@@ -13,8 +14,19 @@ import { AGENT_ENV } from '../policy/tool.policy.js';
  * unattended, we receive the result message (with session_id + modelUsage),
  * and the run ends without hanging. Costs a fraction of a cent on haiku.
  */
-export async function runSmoke(opts: { model: string; cancelAfterMs?: number }): Promise<number> {
-  const driver = new LocalDriver();
+export async function runSmoke(opts: {
+  model: string;
+  cancelAfterMs?: number;
+  driver?: 'local' | 'docker';
+  image?: string;
+}): Promise<number> {
+  const driver = createDriver(
+    {
+      driver: opts.driver ?? 'local',
+      docker: dockerConfigSchema.parse(opts.image ? { image: opts.image } : {}),
+    },
+    { bootId: `smoke-${Date.now()}`, log: console.log },
+  );
   await driver.preflight();
   const cwd = mkdtempSync(join(tmpdir(), 'ai-orch-smoke-'));
   const runId = newRunId();
@@ -25,6 +37,8 @@ export async function runSmoke(opts: { model: string; cancelAfterMs?: number }):
   const session = await driver.start({
     runId,
     cwd,
+    workspaceId: 'smoke',
+    repoPath: cwd,
     additionalReadDirs: [],
     systemPromptAppend: 'You are a smoke test. Follow the user instruction literally and briefly.',
     prompt: opts.cancelAfterMs

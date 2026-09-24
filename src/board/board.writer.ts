@@ -20,6 +20,16 @@ const backoff = (attempt: number): number => Math.min(4 * 60_000, 2_000 * 2 ** a
  * finished" and "comment posted" loses nothing. Single-threaded drain keeps
  * ordering (move, then comment). Each op is idempotent on delivery.
  */
+export interface WriterOptions {
+  /**
+   * Called after one of OUR moves has settled on the board. It is how a role
+   * hands a card to the next one: the move is suppressed as an echo by design,
+   * so the re-route has to be triggered from here rather than waiting for a
+   * poll that will drop it. Defaults to a noop.
+   */
+  readonly onMoved?: (cardId: string) => void;
+}
+
 export class BoardWriter {
   constructor(
     private readonly project: ProjectConfig,
@@ -27,6 +37,7 @@ export class BoardWriter {
     private readonly boardStore: BoardStore,
     private readonly router: BoardRouter,
     private readonly log: WriterLogger,
+    private readonly opts: WriterOptions = {},
   ) {}
 
   /** Expand a configured writeback step into outbox rows. Called from the task lifecycle. */
@@ -106,6 +117,7 @@ export class BoardWriter {
       this.router.noteWriteback(row.card_id);
       this.boardStore.settleOutbox(row.id, outcome);
       this.log.info(`${this.project.id}: writeback ${row.op} on ${row.card_id} → ${outcome}`);
+      if (row.op === 'move' && outcome === 'done') this.opts.onMoved?.(row.card_id);
     } catch (err) {
       const e =
         err instanceof BoardError

@@ -5,10 +5,12 @@ import { Command } from 'commander';
 
 import { describeBoard, initBoard, listBoards, showStatus } from './cli/board.commands.js';
 import { runDoctor } from './cli/doctor.js';
+import { buildImage, checkImage, pullImage } from './cli/image.js';
 import { republish } from './cli/republish.js';
 import { runTask } from './cli/run-task.js';
 import { runSmoke } from './cli/smoke.js';
 import { serveOnly, startDaemon } from './cli/start.js';
+import { deleteWebhooks, listWebhooks, registerWebhooks } from './cli/webhook.cli.js';
 import { ROLES } from './config/config.schema.js';
 import { loadDotEnv } from './config/load-env.js';
 
@@ -23,8 +25,67 @@ program
   .command('start')
   .description('Run the daemon: poll boards, dispatch agents, write back results, serve the office')
   .option('--no-server', 'do not start the office web server')
-  .action(async (o: { server: boolean }) => {
-    process.exitCode = await startDaemon({ noServer: !o.server });
+  .option('--no-webhook', 'do not start the webhook receiver; poll only')
+  .action(async (o: { server: boolean; webhook: boolean }) => {
+    process.exitCode = await startDaemon({ noServer: !o.server, noWebhook: !o.webhook });
+  });
+
+const image = program
+  .command('image')
+  .description('Build, verify and pull the container image agents run in');
+
+image
+  .command('build')
+  .description('Build the agent image, pinning the CLI to the version the SDK bundles')
+  .option('--tag <image>', 'override the image tag from the config')
+  .option('--cli-version <v>', 'pin a specific @anthropic-ai/claude-code version')
+  .action(async (o: { tag?: string; cliVersion?: string }) => {
+    process.exitCode = await buildImage(o.tag, o.cliVersion);
+  });
+
+image
+  .command('check')
+  .description("Compare the image's CLI version against the one the SDK bundles")
+  .option('--tag <image>', 'check one image instead of every configured one')
+  .action(async (o: { tag?: string }) => {
+    process.exitCode = await checkImage(o.tag);
+  });
+
+image
+  .command('pull')
+  .description('Pull the configured agent image(s)')
+  .option('--tag <image>', 'pull one image instead of every configured one')
+  .action(async (o: { tag?: string }) => {
+    process.exitCode = await pullImage(o.tag);
+  });
+
+const webhooks = program
+  .command('webhooks')
+  .description('Inspect and manage the board-side push registrations');
+
+webhooks
+  .command('list')
+  .description('Show every webhook this token owns, and which are ours')
+  .option('-p, --project <id>', 'limit to one project')
+  .action(async (o: { project?: string }) => {
+    process.exitCode = await listWebhooks(o.project);
+  });
+
+webhooks
+  .command('register')
+  .description('Create or refresh the registration for each webhook-enabled project')
+  .option('-p, --project <id>', 'limit to one project')
+  .option('--url <publicBase>', 'override ORCHESTRATOR_WEBHOOK_PUBLIC_URL')
+  .action(async (o: { project?: string; url?: string }) => {
+    process.exitCode = await registerWebhooks(o.project, o.url);
+  });
+
+webhooks
+  .command('delete')
+  .description('Remove our registrations (use before abandoning a tunnel URL)')
+  .option('-p, --project <id>', 'limit to one project')
+  .action(async (o: { project?: string }) => {
+    process.exitCode = await deleteWebhooks(o.project);
   });
 
 program
@@ -52,9 +113,9 @@ program
 
 program
   .command('doctor')
-  .description('Check toolchain, credentials, config and target repos')
-  .action(() => {
-    process.exitCode = runDoctor();
+  .description('Check toolchain, credentials, config, webhooks and target repos')
+  .action(async () => {
+    process.exitCode = await runDoctor();
   });
 
 program
@@ -86,10 +147,14 @@ program
   .description('Cheap live check of the Agent SDK driver (single turn, no tools)')
   .option('-m, --model <model>', 'model alias or id', 'haiku')
   .option('--cancel <ms>', 'start a long reply and cancel after N ms to test the kill ladder')
-  .action(async (o: { model: string; cancel?: string }) => {
+  .option('--driver <kind>', 'local|docker — run the turn in a container instead')
+  .option('--image <image>', 'image to use with --driver docker')
+  .action(async (o: { model: string; cancel?: string; driver?: string; image?: string }) => {
     process.exitCode = await runSmoke({
       model: o.model,
       ...(o.cancel ? { cancelAfterMs: Number(o.cancel) } : {}),
+      ...(o.driver === 'docker' ? { driver: 'docker' as const } : {}),
+      ...(o.image ? { image: o.image } : {}),
     });
   });
 
@@ -106,6 +171,7 @@ program
   .option('--label <label...>', 'labels to pass to the agent')
   .option('--dry-run', 'run the agent and verify, but do not commit/push/PR')
   .option('--keep', 'retain the worktree even on success')
+  .option('--driver <kind>', "local|docker — override the project's exec.driver")
   .action(
     async (o: {
       project: string;
@@ -117,6 +183,7 @@ program
       url?: string;
       label?: string[];
       dryRun?: boolean;
+      driver?: string;
       keep?: boolean;
     }) => {
       const spec = o.specFile ? readFileSync(o.specFile, 'utf8') : (o.spec ?? '');
@@ -130,6 +197,7 @@ program
         ...(o.label ? { labels: o.label } : {}),
         ...(o.dryRun ? { dryRun: true } : {}),
         ...(o.keep ? { keepWorkspace: true } : {}),
+        ...(o.driver === 'docker' || o.driver === 'local' ? { driver: o.driver } : {}),
       });
     },
   );

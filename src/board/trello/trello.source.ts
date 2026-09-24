@@ -4,6 +4,8 @@ import {
   type BoardCapabilities,
   type BoardPollResult,
   type BoardSource,
+  type RegisteredWebhook,
+  type WebhookRegistrar,
 } from '../board.source.js';
 import type { BoardCard, BoardComment, BoardTopology } from '../board.types.js';
 
@@ -30,7 +32,7 @@ import {
  * loop guard need. Card snapshots are only fetched lazily for routed events
  * and on the periodic reconcile.
  */
-export class TrelloSource implements BoardSource {
+export class TrelloSource implements BoardSource, WebhookRegistrar {
   readonly provider = 'trello' as const;
   readonly capabilities: BoardCapabilities = {
     hasChangeFeed: true,
@@ -39,8 +41,10 @@ export class TrelloSource implements BoardSource {
     canAssignMember: true,
     canAddLabel: true,
     labelsAreFreeform: false,
+    canRegisterWebhook: true,
   };
   private readonly http: TrelloHttp;
+  private readonly cred: BoardCredential;
   private labelsById = new Map<string, string>();
 
   constructor(
@@ -49,6 +53,7 @@ export class TrelloSource implements BoardSource {
     http?: TrelloHttp,
   ) {
     this.http = http ?? new TrelloHttp(cred);
+    this.cred = cred;
   }
 
   async describe(): Promise<BoardTopology> {
@@ -152,6 +157,32 @@ export class TrelloSource implements BoardSource {
     return this.http.get<{ id: string; username: string }>('/members/me', {
       fields: 'id,username',
     });
+  }
+
+  // ── WebhookRegistrar ──────────────────────────────────────────────────
+  //
+  // All four inherit retries, 429 back-off and URL redaction from TrelloHttp.
+  // Note the asymmetry: webhooks are scoped to the TOKEN, not the board, so
+  // listing them needs the token in the path as well as the query string.
+
+  async listWebhooks(): Promise<readonly RegisteredWebhook[]> {
+    return this.http.get<RegisteredWebhook[]>(`/tokens/${this.cred.token}/webhooks`);
+  }
+
+  async createWebhook(callbackURL: string, description: string): Promise<RegisteredWebhook> {
+    return this.http.post<RegisteredWebhook>('/webhooks', {
+      callbackURL,
+      idModel: this.boardId,
+      description,
+    });
+  }
+
+  async updateWebhook(id: string, callbackURL: string): Promise<RegisteredWebhook> {
+    return this.http.put<RegisteredWebhook>(`/webhooks/${id}`, { callbackURL });
+  }
+
+  async deleteWebhook(id: string): Promise<void> {
+    await this.http.delete(`/webhooks/${id}`);
   }
 
   // ── bootstrap helpers used by the CLI ─────────────────────────────────

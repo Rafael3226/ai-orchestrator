@@ -82,6 +82,13 @@ export interface BoardEvent {
   readonly card: BoardCard | null;
   /** True when synthesized by a reconcile diff rather than read from a change feed. */
   readonly synthetic: boolean;
+  /**
+   * Set only for a re-route triggered by our OWN settled move, so one role can
+   * hand a card to another. It deliberately bypasses the echo guard and the
+   * reconcile ledger check — the arrival counter in the dedupe key and the
+   * per-role circuit breaker are what keep that from looping.
+   */
+  readonly handoff?: boolean;
 }
 
 export const normalizeColumnName = (name: string): string => name.trim().toLocaleLowerCase();

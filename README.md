@@ -6,10 +6,10 @@ its own git worktree, the orchestrator verifies the result, pushes a branch,
 opens a draft PR and reports back on the card. A read-only 2D office shows
 who is working on what.
 
-> **Status:** phases 0–4 built (execution spine, Trello integration, office
-> UI). Milestone 1 is met: two Trello cards have gone from **Ready for Dev**
-> to a reviewed draft PR unattended. Phase 5 (breadth) is next. See
-> `docs/roadmap.md`.
+> **Status:** phases 0–4 done; phase 5 (all five roles, webhook delivery, the
+> Docker driver) is built and green but not yet live-proven. Milestone 1 is met:
+> two Trello cards have gone from **Ready for Dev** to a reviewed draft PR
+> unattended. Milestone 2 is the live runs listed in `docs/roadmap.md`.
 
 ## Quick start
 
@@ -30,14 +30,15 @@ Move a card with the `be` label into **Ready for Dev** and watch the office.
 
 ## Commands
 
-| Command                                           | What it does                                                                                  |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `start`                                           | Daemon: poll boards, dispatch agents, write back, serve the office (`--no-server` to skip it) |
-| `serve`                                           | Office UI only, over the existing database                                                    |
-| `status`                                          | Queue, cursors and outbox from the local database                                             |
-| `run-task -p <project> -t <title> -s <spec>`      | One task end to end with no board (`--dry-run` skips push/PR)                                 |
-| `smoke [--cancel <ms>]`                           | Cheap live check of the Agent SDK driver and the cancel ladder                                |
-| `doctor` · `boards` · `lists <id>` · `init-board` | Setup helpers                                                                                 |
+| Command                                           | What it does                                                                                                       |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `start`                                           | Daemon: poll boards, dispatch agents, write back, serve the office (`--no-server` / `--no-webhook` to skip either) |
+| `serve`                                           | Office UI only, over the existing database                                                                         |
+| `status`                                          | Queue, cursors and outbox from the local database                                                                  |
+| `run-task -p <project> -t <title> -s <spec>`      | One task end to end with no board (`--dry-run` skips push/PR)                                                      |
+| `smoke [--cancel <ms>]`                           | Cheap live check of the Agent SDK driver and the cancel ladder                                                     |
+| `webhooks list\|register\|delete`                 | Manage board-side push registrations (see `docs/webhooks.md`)                                                      |
+| `doctor` · `boards` · `lists <id>` · `init-board` | Setup helpers                                                                                                      |
 
 ## How a card becomes a PR
 

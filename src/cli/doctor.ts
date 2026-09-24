@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { loadConfig } from '../config/config.loader.js';
+import { loadConfig, type LoadedConfig } from '../config/config.loader.js';
 import { resolveBoardCredentials } from '../config/credentials.js';
 import { loadOrchestratorEnv, type OrchestratorEnv } from '../config/env.js';
 
@@ -197,7 +197,182 @@ function prLabelsCheck(githubRepo: string, wanted: readonly string[]): Check {
   };
 }
 
-export function runDoctor(): number {
+/**
+ * Webhook plumbing fails in ways that are invisible until a card is dropped:
+ * the wrong one of three Trello credentials, an http URL Trello refuses, or a
+ * tunnel that is simply not up. Catch all of it here, before a live run.
+ */
+async function webhookChecks(env: OrchestratorEnv, loaded: LoadedConfig): Promise<Check[]> {
+  const enabled = loaded.config.projects.filter((p) => p.enabled && p.board.webhook.enabled);
+  if (enabled.length === 0) {
+    return [{ name: 'webhooks', status: 'ok', detail: 'not enabled — polling only' }];
+  }
+
+  const out: Check[] = [
+    {
+      name: 'webhooks',
+      status: 'ok',
+      detail: `enabled for ${enabled.map((p) => p.id).join(', ')}`,
+    },
+  ];
+
+  for (const p of enabled) {
+    const ref = p.board.credentials;
+    const secret = process.env[`${ref}_API_SECRET`];
+    out.push({
+      name: `  ${ref}_API_SECRET`,
+      status: secret ? 'ok' : 'fail',
+      detail: secret
+        ? 'set'
+        : 'missing — the OAuth secret next to your API key at https://trello.com/power-ups/admin ' +
+          '(neither the API key nor the token)',
+    });
+  }
+
+  const publicUrl = env.ORCHESTRATOR_WEBHOOK_PUBLIC_URL;
+  if (!publicUrl) {
+    out.push({
+      name: '  public url',
+      status: 'fail',
+      detail: 'ORCHESTRATOR_WEBHOOK_PUBLIC_URL is not set — see docs/webhooks.md',
+    });
+  } else if (!publicUrl.startsWith('https://')) {
+    out.push({
+      name: '  public url',
+      status: 'fail',
+      detail: `must be https (Trello refuses http and localhost); got ${publicUrl}`,
+    });
+  } else {
+    out.push({ name: '  public url', status: 'ok', detail: publicUrl });
+    // The tunnel may legitimately not be running yet, so this is a warning.
+    const probe = `${publicUrl.replace(/\/+$/, '')}${env.ORCHESTRATOR_WEBHOOK_PATH_PREFIX}/healthz`;
+    try {
+      const res = await fetch(probe, { signal: AbortSignal.timeout(5000) });
+      out.push({
+        name: '  tunnel',
+        status: res.ok ? 'ok' : 'warn',
+        detail: res.ok ? `reaches the daemon (${probe})` : `${probe} → ${res.status}`,
+      });
+    } catch (e) {
+      out.push({
+        name: '  tunnel',
+        status: 'warn',
+        detail: `cannot reach ${probe} (${e instanceof Error ? e.message : String(e)}) — is the daemon and the tunnel up?`,
+      });
+    }
+  }
+
+  out.push({
+    name: '  path secret',
+    status: env.ORCHESTRATOR_WEBHOOK_PATH_SECRET ? 'ok' : 'fail',
+    detail: env.ORCHESTRATOR_WEBHOOK_PATH_SECRET
+      ? 'set'
+      : 'ORCHESTRATOR_WEBHOOK_PATH_SECRET is not set',
+  });
+
+  return out;
+}
+
+/**
+ * Docker checks. Every one of these is a failure that would otherwise only
+ * surface mid-run: no daemon, Windows-container mode, a worktreeRoot Docker
+ * Desktop will not share, or an image whose CLI cannot talk to our SDK.
+ */
+async function dockerChecks(env: OrchestratorEnv, loaded: LoadedConfig): Promise<Check[]> {
+  const containerized = loaded.config.projects.filter(
+    (p) =>
+      p.enabled && Object.values(p.agents).some((a) => a.enabled && a.exec.driver === 'docker'),
+  );
+  if (containerized.length === 0) {
+    return [{ name: 'docker', status: 'ok', detail: 'not used — every role runs locally' }];
+  }
+
+  const { DockerCli } = await import('../exec/docker/docker.cli.js');
+  const { sdkBundledCliVersion } = await import('./image.js');
+  const cli = new DockerCli();
+  const out: Check[] = [];
+
+  const version = await cli.version().catch(() => null);
+  if (!version || version.exitCode !== 0) {
+    out.push({
+      name: 'docker',
+      status: 'fail',
+      detail: 'daemon not reachable — start Docker Desktop (WSL2 backend)',
+    });
+    return out;
+  }
+  out.push({
+    name: 'docker',
+    status: 'ok',
+    detail: `used by ${containerized.map((p) => p.id).join(', ')}`,
+  });
+
+  const info = await cli.info();
+  const linux = /"OSType"\s*:\s*"linux"/.test(info.stdout);
+  out.push({
+    name: '  containers',
+    status: linux ? 'ok' : 'fail',
+    detail: linux ? 'linux' : 'daemon is in Windows-container mode — the agent image cannot run',
+  });
+
+  const expected = sdkBundledCliVersion();
+  const images = new Set(
+    containerized.flatMap((p) =>
+      Object.values(p.agents)
+        .filter((a) => a.enabled && a.exec.driver === 'docker')
+        .map((a) => a.exec.docker.image),
+    ),
+  );
+  for (const image of images) {
+    const inspected = await cli.imageInspect(image);
+    if (inspected.exitCode !== 0) {
+      out.push({
+        name: `  image ${image}`,
+        status: 'fail',
+        detail: 'not present — run `orchestrator image build`',
+      });
+      continue;
+    }
+    const labelled = /"org\.aiorch\.cli-version"\s*:\s*"([^"]+)"/.exec(inspected.stdout)?.[1];
+    const drift = expected && labelled && labelled !== expected;
+    out.push({
+      name: `  image ${image}`,
+      status: drift ? 'warn' : 'ok',
+      detail: drift
+        ? `CLI ${labelled} but the SDK bundles ${expected} — rebuild if runs stall after init`
+        : `CLI ${labelled ?? 'unlabelled'}`,
+    });
+  }
+
+  // The real Windows trap: a drive Docker Desktop will not share.
+  for (const p of containerized) {
+    const root = resolve(p.repo.worktreeRoot);
+    const probe = await cli.exec(
+      ['run', '--rm', '--mount', `type=bind,source=${root},target=/probe`, 'alpine', 'true'],
+      60_000,
+    );
+    out.push({
+      name: `  mount ${p.id}`,
+      status: probe.exitCode === 0 ? 'ok' : 'warn',
+      detail:
+        probe.exitCode === 0
+          ? `${root} is bind-mountable`
+          : `could not bind-mount ${root} — check Docker Desktop file sharing (${probe.output.slice(-160).trim()})`,
+    });
+  }
+
+  if (!env.ANTHROPIC_API_KEY && !process.env['CLAUDE_CODE_OAUTH_TOKEN']) {
+    out.push({
+      name: '  model auth',
+      status: 'fail',
+      detail:
+        'containers get no host environment — set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN',
+    });
+  }
+  return out;
+}
+
+export async function runDoctor(): Promise<number> {
   const checks: Check[] = [
     tool('node', ['--version'], '22.0.0'),
     tool('pnpm', ['--version'], '10.0.0'),
@@ -220,6 +395,13 @@ export function runDoctor(): number {
   }
   if (env) {
     checks.push(...envCheck(env), ...configChecks(env));
+    try {
+      const loaded = loadConfig(resolve(env.ORCHESTRATOR_CONFIG));
+      checks.push(...(await webhookChecks(env, loaded)));
+      checks.push(...(await dockerChecks(env, loaded)));
+    } catch {
+      // configChecks already reported why the config could not load.
+    }
   }
 
   const width = Math.max(...checks.map((c) => c.name.length));

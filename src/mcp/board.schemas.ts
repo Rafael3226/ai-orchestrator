@@ -63,13 +63,35 @@ export const conventionalCommitSchema = z.object({
   breaking: z.string().max(500).optional(),
 });
 
+export const FINDING_SEVERITIES = ['blocker', 'major', 'minor', 'nit'] as const;
+
+/** QA's deliverable when it reviews rather than writes. */
+export const findingSchema = z.object({
+  severity: z.enum(FINDING_SEVERITIES),
+  title: z.string().min(5).max(120),
+  detail: z.string().min(10).max(2000),
+  /** `path:line`, when the finding has one. */
+  location: z.string().max(300).optional(),
+});
+
+/**
+ * Still ONE propose_summary tool, so the board server, the scripted driver and
+ * the office log renderer are untouched. What changed is that `commit` is now
+ * optional at the schema level: whether a role must supply one is a property of
+ * the role (see `ROLE_DELIVERY.requireCommit`), enforced in the task runner,
+ * whose rejection path already round-trips back to the agent.
+ */
 export const proposeSummaryShape = {
   title: z.string().min(5).max(100),
   summary: z.string().min(20).max(4000),
   testPlan: z.string().min(10).max(2000),
   filesTouched: z.array(z.string().max(300)).max(200),
   followUps: z.array(z.string().max(300)).max(10).optional(),
-  commit: conventionalCommitSchema,
+  commit: conventionalCommitSchema.optional(),
+  /** QA. */
+  findings: z.array(findingSchema).max(30).optional(),
+  /** PM. */
+  acceptanceCriteria: z.array(z.string().min(5).max(300)).max(20).optional(),
 } as const;
 
 export type ProgressReport = z.infer<z.ZodObject<typeof reportProgressShape>>;
@@ -77,3 +99,5 @@ export type BlockedReport = z.infer<z.ZodObject<typeof reportBlockedShape>>;
 export type Decision = z.infer<z.ZodObject<typeof recordDecisionShape>>;
 export type ProposedSummary = z.infer<z.ZodObject<typeof proposeSummaryShape>>;
 export type ConventionalCommit = z.infer<typeof conventionalCommitSchema>;
+export type Finding = z.infer<typeof findingSchema>;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];

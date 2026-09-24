@@ -28,15 +28,111 @@ export const agentSettingsSchema = z.strictObject({
 });
 
 /** What `defaults.agents.<ROLE>` may contain — everything optional. */
+export const writebackStepSchema = z.strictObject({
+  move: columnAlias.optional(),
+  comment: z.enum(['none', 'started', 'report']).default('none'),
+  addLabel: labelList.optional(),
+  removeLabel: labelList.optional(),
+  assign: z.enum(['bot', 'none']).default('none'),
+  /** When true, an unsupported/failed step marks the run partially reported. */
+  required: z.boolean().default(false),
+});
+
+const writebackSchema = z.strictObject({
+  onStart: writebackStepSchema.prefault({}),
+  onSuccess: writebackStepSchema.prefault({}),
+  onFailure: writebackStepSchema.prefault({}),
+  onBlocked: writebackStepSchema.prefault({}),
+});
+
+export const DRIVER_KINDS = ['local', 'docker'] as const;
+
+/**
+ * The docker block's fields, without defaults. Both the base schema and the
+ * overlay schema are derived from this so they cannot drift apart.
+ */
+const dockerFields = {
+  image: z.string().min(1),
+  pullPolicy: z.enum(['missing', 'always', 'never']),
+  /**
+   * `none` is offered for read-only roles, but cannot be the default: the CLI
+   * must reach api.anthropic.com and installs must reach the registry.
+   */
+  network: z.string().min(1),
+  cpus: z.number().positive().max(64),
+  memoryMb: z.number().int().min(512).max(131_072),
+  pidsLimit: z.number().int().min(64).max(16_384),
+  tmpfsMb: z.number().int().min(16).max(8192),
+  user: z.string().min(1),
+  /** Mount the parent repo's .git so a worktree's gitdir link resolves. */
+  mountGitDir: z.boolean(),
+  /** Off for pnpm-workspace monorepos, whose node_modules is not one directory. */
+  nodeModulesVolume: z.boolean(),
+  sharedStoreVolume: z.boolean(),
+  extraMounts: z.array(z.string().min(1)),
+  dockerHost: z.string(),
+  startTimeoutSeconds: z.number().int().min(10).max(600),
+} as const;
+
+export const dockerConfigSchema = z.strictObject({
+  image: dockerFields.image.default('ai-orchestrator/agent:latest'),
+  pullPolicy: dockerFields.pullPolicy.default('missing'),
+  network: dockerFields.network.default('bridge'),
+  cpus: dockerFields.cpus.default(2),
+  memoryMb: dockerFields.memoryMb.default(4096),
+  pidsLimit: dockerFields.pidsLimit.default(512),
+  tmpfsMb: dockerFields.tmpfsMb.default(512),
+  user: dockerFields.user.default('1000:1000'),
+  mountGitDir: dockerFields.mountGitDir.default(true),
+  nodeModulesVolume: dockerFields.nodeModulesVolume.default(true),
+  sharedStoreVolume: dockerFields.sharedStoreVolume.default(true),
+  extraMounts: dockerFields.extraMounts.default([]),
+  dockerHost: dockerFields.dockerHost.default(''),
+  startTimeoutSeconds: dockerFields.startTimeoutSeconds.default(120),
+});
+
+export const dockerOverlaySchema = z.strictObject(
+  Object.fromEntries(Object.entries(dockerFields).map(([k, v]) => [k, v.optional()])) as {
+    [K in keyof typeof dockerFields]: z.ZodOptional<(typeof dockerFields)[K]>;
+  },
+);
+
+/** The base, with every default filled in. Only `defaults.exec` uses this. */
+export const execConfigSchema = z.strictObject({
+  driver: z.enum(DRIVER_KINDS).default('local'),
+  docker: dockerConfigSchema.prefault({}),
+});
+
+export const execOverlaySchema = z.strictObject({
+  driver: z.enum(DRIVER_KINDS).optional(),
+  docker: dockerOverlaySchema.optional(),
+});
+
 const agentDefaultsSchema = z.strictObject({
   model: z.string().min(1).optional(),
   budget: budgetSchema.partial().optional(),
   systemPromptFile: z.string().min(1).optional(),
 });
 
-/** What `projects[].agents.<ROLE>` may contain — an enable flag plus overrides. */
+/**
+ * What `projects[].agents.<ROLE>` may contain — an enable flag plus overrides.
+ *
+ * `writeback` overlays the project's, per step, and is not optional polish: a
+ * successful QA run under a single project-level `onSuccess: { move: review }`
+ * would move the card straight back into QA's own trigger column.
+ */
 const agentOverrideSchema = agentDefaultsSchema.extend({
   enabled: z.boolean().default(false),
+  /** Per-role docker overlay, e.g. a different image for the frontend role. */
+  docker: dockerOverlaySchema.optional(),
+  writeback: z
+    .strictObject({
+      onStart: writebackStepSchema.optional(),
+      onSuccess: writebackStepSchema.optional(),
+      onFailure: writebackStepSchema.optional(),
+      onBlocked: writebackStepSchema.optional(),
+    })
+    .optional(),
 });
 
 const prSchema = z.strictObject({
@@ -84,23 +180,6 @@ export const routeSchema = z.strictObject({
   priority: z.number().int().default(0),
 });
 
-export const writebackStepSchema = z.strictObject({
-  move: columnAlias.optional(),
-  comment: z.enum(['none', 'started', 'report']).default('none'),
-  addLabel: labelList.optional(),
-  removeLabel: labelList.optional(),
-  assign: z.enum(['bot', 'none']).default('none'),
-  /** When true, an unsupported/failed step marks the run partially reported. */
-  required: z.boolean().default(false),
-});
-
-const writebackSchema = z.strictObject({
-  onStart: writebackStepSchema.prefault({}),
-  onSuccess: writebackStepSchema.prefault({}),
-  onFailure: writebackStepSchema.prefault({}),
-  onBlocked: writebackStepSchema.prefault({}),
-});
-
 export const projectSchema = z.strictObject({
   /** SQLite key, URL segment and office room id. */
   id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,38}$/, 'kebab-case, 2-39 chars'),
@@ -125,7 +204,9 @@ export const projectSchema = z.strictObject({
       lint: z.string().min(1).optional(),
       typecheck: z.string().min(1).optional(),
       test: z.string().min(1).optional(),
-      required: z.array(z.enum(['install', 'lint', 'typecheck', 'test'])).default([]),
+      /** DEVOPS verifies with this when present, else falls back to `test`. */
+      infra: z.string().min(1).optional(),
+      required: z.array(z.enum(['install', 'lint', 'typecheck', 'test', 'infra'])).default([]),
       timeoutMinutes: z.number().int().positive().max(120).default(15),
     })
     .prefault({}),
@@ -141,9 +222,21 @@ export const projectSchema = z.strictObject({
         reconcileOnStart: z.boolean().default(true),
       })
       .prefault({}),
+    webhook: z
+      .strictObject({
+        enabled: z.boolean().default(false),
+        /** Reconcile the provider-side registration at every boot. */
+        manageRegistration: z.boolean().default(true),
+        /** Dev tunnels: the URL dies with the process, so drop the registration. */
+        deleteOnShutdown: z.boolean().default(false),
+        maxBufferedEvents: z.number().int().min(10).max(10_000).default(500),
+        maxEventAgeSeconds: z.number().int().min(30).max(86_400).default(600),
+      })
+      .prefault({}),
     /** semantic alias -> board column name */
     columns: z.record(columnAlias, columnName).default({}),
   }),
+  exec: execOverlaySchema.optional(),
   agents: z.partialRecord(roleSchema, agentOverrideSchema).default({}),
   routes: z.array(routeSchema).min(1),
   writeback: writebackSchema.prefault({}),
@@ -162,6 +255,7 @@ export const orchestratorConfigSchema = z
           })
           .prefault({}),
         agents: z.partialRecord(roleSchema, agentDefaultsSchema).default({}),
+        exec: execConfigSchema.prefault({}),
         pr: prSchema.prefault({}),
       })
       .prefault({}),
@@ -194,6 +288,13 @@ export const orchestratorConfigSchema = z
         });
       }
       boards.set(boardKey, p.id);
+      if (p.board.webhook.enabled && p.board.provider !== 'trello') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['projects', i, 'board', 'webhook', 'enabled'],
+          message: `webhooks are only implemented for trello, not ${p.board.provider}`,
+        });
+      }
     });
   });
 
@@ -202,5 +303,7 @@ export type OrchestratorConfigRaw = z.output<typeof orchestratorConfigSchema>;
 export type ProjectConfigRaw = z.output<typeof projectSchema>;
 export type RouteConfig = z.output<typeof routeSchema>;
 export type WritebackStep = z.output<typeof writebackStepSchema>;
+export type DockerConfig = z.output<typeof dockerConfigSchema>;
+export type ExecConfig = z.output<typeof execConfigSchema>;
 export type AgentSettings = z.output<typeof agentSettingsSchema>;
 export type Budget = z.output<typeof budgetSchema>;

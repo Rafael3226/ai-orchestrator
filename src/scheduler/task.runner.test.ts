@@ -26,20 +26,38 @@ let repo: string;
 let wtRoot: string;
 let store: SqliteStore;
 
-const yaml = (repoPath: string, wt: string, test?: string) => `
+interface ProjectOpts {
+  readonly test?: string;
+  readonly install?: string;
+  readonly repoPath?: string;
+}
+
+const yaml = (repoPath: string, wt: string, o: ProjectOpts) => `
 version: 1
 projects:
   - id: demo
     name: Demo
     repo: { path: ${JSON.stringify(repoPath)}, worktreeRoot: ${JSON.stringify(wt)}, githubRepo: me/demo }
     board: { provider: trello, boardId: b1, credentials: T, columns: {} }
-    checks: { ${test ? `test: ${JSON.stringify(test)}` : ''} }
-    agents: { DEV-BE: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } } }
+    checks: { ${[
+      o.test ? `test: ${JSON.stringify(o.test)}` : null,
+      o.install ? `install: ${JSON.stringify(o.install)}` : null,
+    ]
+      .filter(Boolean)
+      .join(', ')} }
+    agents:
+      DEV-BE: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
+      QA: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
+      PM: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
+      DEVOPS: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
     routes: [{ when: { list: Ready }, agent: DEV-BE }]
 `;
 
 const project = (test?: string, repoPath = repo): ProjectConfig =>
-  loadConfigFromString(yaml(repoPath, wtRoot, test), 'x').project('demo');
+  loadConfigFromString(yaml(repoPath, wtRoot, { ...(test ? { test } : {}) }), 'x').project('demo');
+
+const projectWith = (o: ProjectOpts): ProjectConfig =>
+  loadConfigFromString(yaml(o.repoPath ?? repo, wtRoot, o), 'x').project('demo');
 
 /** Records what the board would have been told, in order. */
 class RecordingSink implements TaskSink {
@@ -57,11 +75,11 @@ class RecordingSink implements TaskSink {
   }
 }
 
-function claimedTask(maxAttempts = 2): TaskRow {
+function claimedTask(maxAttempts = 2, role = 'DEV-BE'): TaskRow {
   const t = store.insertTask({
     id: newTaskId(),
     projectId: 'demo',
-    role: 'DEV-BE',
+    role,
     cardId: 'c1',
     cardShortId: '42',
     title: 'Add a thing',
@@ -325,4 +343,195 @@ describe('validateCommitWithRepo', () => {
     );
     expect(long[0]).toMatch(/header is \d+ chars \(max 100\)/);
   });
+});
+
+describe('delivery policy: roles that do not end in a pull request', () => {
+  it('runs PM with no install, no verify, no branch diff and no commit', async () => {
+    // `exit 1` for both hooks is the proof: if either ran, the run would fail.
+    const driver = new ScriptedDriver([
+      {
+        calls: [
+          ['report_progress', { phase: 'planning', message: 'refining the spec' }],
+          [
+            'propose_summary',
+            {
+              title: 'Specification: withdraw an application',
+              summary:
+                'An applicant can withdraw a submitted application.\nWithdrawal is reversible for 24 hours.\nThe employer sees the withdrawal in their inbox.\nAudit keeps the original submission.',
+              testPlan: 'Covered by the acceptance criteria below.',
+              filesTouched: [],
+              acceptanceCriteria: [
+                'A submitted application shows a Withdraw action',
+                'Withdrawing moves it to the Withdrawn state',
+              ],
+              // Deliberately no `commit` — PM has nothing to commit.
+            },
+          ],
+        ],
+      },
+    ]);
+    const sink = new RecordingSink();
+    const task = claimedTask(2, 'PM');
+
+    const r = await executeTask(
+      deps(driver, sink),
+      projectWith({ install: 'exit 1', test: 'exit 1' }),
+      task,
+      { keepWorkspace: true },
+    );
+
+    expect(r.verdict).toBe('review');
+    expect(r.prUrl).toBeNull();
+    expect(store.getTask(task.id).state).toBe('review');
+
+    // No verify ran at all.
+    expect(store.listRunsForTask(task.id)[0]!.verify_exit_code).toBeNull();
+
+    // Nothing was committed to the worktree branch.
+    const ws = store.listWorkspaces('demo')[0]!;
+    expect(git(ws.path, 'log', '--oneline').split('\n')).toHaveLength(1);
+
+    // The comment carries the spec itself, not a branch/diff teaser.
+    const comment = sink.finished[0]!.comment;
+    expect(comment).toContain('Audit keeps the original submission.');
+    expect(comment).toContain('## Acceptance criteria');
+    expect(comment).toContain('- [ ] A submitted application shows a Withdraw action');
+    expect(comment).not.toContain('Branch:');
+    expect(comment).not.toContain('Changes:');
+
+    // PM may not write anything, at the tool level.
+    const spec = driver.specs[0]!;
+    expect(spec.allowedTools).not.toContain('Write');
+    expect(spec.allowedTools).not.toContain('Edit');
+    expect(spec.allowedTools).not.toContain('Bash');
+  }, 60_000);
+
+  it('lets QA finish clean with findings and no diff', async () => {
+    const driver = new ScriptedDriver([
+      {
+        // No `work`: QA reviewed the branch and changed nothing.
+        calls: [
+          [
+            'propose_summary',
+            {
+              title: 'Review of the slugify branch',
+              summary: 'The implementation matches the card. Two issues worth fixing first.',
+              testPlan: 'Ran the existing suite; it passes.',
+              filesTouched: [],
+              findings: [
+                {
+                  severity: 'major',
+                  title: 'Empty input is not handled',
+                  detail: 'slugify("") returns undefined rather than an empty string.',
+                  location: 'src/slugify.ts:12',
+                },
+                {
+                  severity: 'nit',
+                  title: 'Redundant comment',
+                  detail: 'The comment on line 4 restates the function name.',
+                },
+              ],
+              commit: { type: 'test', subject: 'review the slugify branch' },
+            },
+          ],
+        ],
+      },
+    ]);
+    const sink = new RecordingSink();
+    const task = claimedTask(2, 'QA');
+
+    const r = await executeTask(deps(driver, sink), project('git --version'), task, {
+      keepWorkspace: true,
+    });
+
+    // This is the case that used to land in `failed` with nothing-to-commit.
+    expect(r.verdict).toBe('review');
+    expect(r.prUrl).toBeNull();
+    expect(store.getTask(task.id).state).toBe('review');
+
+    const ws = store.listWorkspaces('demo')[0]!;
+    expect(git(ws.path, 'log', '--oneline').split('\n')).toHaveLength(1);
+
+    const comment = sink.finished[0]!.comment;
+    expect(comment).toContain('## Findings');
+    expect(comment).toContain('**major**');
+    expect(comment).toContain('Empty input is not handled');
+    expect(comment).toContain('src/slugify.ts:12');
+  }, 60_000);
+
+  it('still fails a DEV role that produces no diff', async () => {
+    // The `optional` escape hatch must not leak to roles that must produce code.
+    const driver = new ScriptedDriver([{ calls: [['propose_summary', aSummary()]] }]);
+    const task = claimedTask(1, 'DEV-BE');
+
+    const r = await executeTask(deps(driver, new RecordingSink()), project(), task, {
+      keepWorkspace: true,
+    });
+
+    expect(r.verdict).toBe('failed');
+    expect(r.reason).toContain('nothing-to-commit');
+  }, 60_000);
+
+  it('rejects a summary with no commit from a role that must commit', async () => {
+    const noCommit = aSummary();
+    delete (noCommit as Record<string, unknown>).commit;
+    const driver = new ScriptedDriver([
+      {
+        work: (cwd) => writeFileSync(join(cwd, 'thing.ts'), 'export const thing = 1;\n'),
+        calls: [['propose_summary', noCommit]],
+      },
+    ]);
+    const task = claimedTask(1, 'DEV-BE');
+
+    const r = await executeTask(deps(driver, new RecordingSink()), project(), task, {
+      keepWorkspace: true,
+    });
+
+    // The summary was refused, so the run ends without one.
+    expect(r.verdict).toBe('needs_human');
+    expect(store.listRunsForTask(task.id)[0]!.summary_json).toBeNull();
+  }, 60_000);
+});
+
+describe('container driver path mapping', () => {
+  it('gives the agent container paths, not host paths, in the guard and the prompt', async () => {
+    // The bug this prevents: the prompt telling a containerized agent to work in
+    // D:\aow\..., and the guard resolving /work/... against the current drive.
+    const driver = new ScriptedDriver([{ calls: [['propose_summary', aSummary()]] }], {
+      kind: 'docker',
+      paths: { mode: 'posix', toAgent: () => '/work' },
+    });
+    const task = claimedTask(1, 'DEV-BE');
+
+    await executeTask(deps(driver, new RecordingSink()), project(), task, {
+      dryRun: true,
+      keepWorkspace: true,
+    });
+
+    const spec = driver.specs[0]!;
+    // The worktree the driver is told to mount is still the real host path...
+    expect(spec.cwd).toContain(wtRoot);
+    expect(spec.repoPath).toBe(repo);
+    expect(spec.workspaceId).toBe(store.listWorkspaces('demo')[0]!.id);
+    // ...but everything the AGENT reads speaks container paths.
+    expect(spec.prompt).toContain('/work');
+    expect(spec.prompt).not.toContain(wtRoot);
+
+    // And the run is recorded against the docker driver.
+    expect(store.listRunsForTask(task.id)[0]!.driver).toBe('docker');
+  }, 60_000);
+
+  it('keeps host paths for the local driver', async () => {
+    const driver = new ScriptedDriver([{ calls: [['propose_summary', aSummary()]] }]);
+    const task = claimedTask(1, 'DEV-BE');
+
+    await executeTask(deps(driver, new RecordingSink()), project(), task, {
+      dryRun: true,
+      keepWorkspace: true,
+    });
+
+    const spec = driver.specs[0]!;
+    expect(spec.prompt).toContain(spec.cwd);
+    expect(store.listRunsForTask(task.id)[0]!.driver).toBe('local');
+  }, 60_000);
 });

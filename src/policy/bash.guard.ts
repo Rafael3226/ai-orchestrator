@@ -1,6 +1,6 @@
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 
-import { type GuardResult, isInside } from './path.guard.js';
+import { type GuardResult, isInside, type PathMode } from './path.guard.js';
 
 /**
  * Bash confinement for an agent working inside a TS/Node worktree.
@@ -203,7 +203,7 @@ function headOf(segment: string): { head: string; tokens: string[] } {
   return { head, tokens };
 }
 
-export function checkBash(root: string, command: string): GuardResult {
+export function checkBash(root: string, command: string, mode: PathMode = 'native'): GuardResult {
   if (!command.trim()) return { ok: false, reason: 'empty command' };
   if (command.length > 4000) return { ok: false, reason: 'command too long' };
 
@@ -224,8 +224,18 @@ export function checkBash(root: string, command: string): GuardResult {
     }
     if (head === 'cd') {
       let target = tokens[1]?.replace(/^["']|["']$/g, '');
-      if (target && process.platform === 'win32') target = fromMsysPath(target);
-      if (target && !isInside(root, resolve(root, target))) {
+      // MSYS translation is a Windows-host concern only: inside a container
+      // `/work` is a real path, and rewriting it to `W:\ork` would be nonsense.
+      if (target && mode === 'native' && process.platform === 'win32') {
+        target = fromMsysPath(target);
+      }
+      const abs =
+        target === undefined
+          ? undefined
+          : mode === 'posix'
+            ? posix.resolve(root, target)
+            : resolve(root, target);
+      if (abs !== undefined && !isInside(root, abs, mode)) {
         return { ok: false, reason: 'cd outside worktree' };
       }
     }

@@ -5,8 +5,8 @@ import type { ProjectConfig } from '../config/config.loader.js';
 import type { Role } from '../config/config.schema.js';
 import type { SqliteStore, WorkspaceRow } from '../db/sqlite.store.js';
 import { newWorkspaceId, shortId, type TaskId, type WorkspaceId } from '../domain/ids.js';
+import { HostExecutor, type WorkspaceExecutor } from '../exec/workspace.executor.js';
 import { KeyedMutex } from '../process/async.mutex.js';
-import { runCommand } from '../process/command.runner.js';
 
 import { renderBranchName, withCollisionSuffix } from './branch.namer.js';
 import { GitCli } from './git.cli.js';
@@ -32,6 +32,20 @@ export interface AcquireInput {
   readonly cardTitle: string;
   /** Retry path: reuse a retained workspace instead of creating one. */
   readonly reuseWorkspaceId?: WorkspaceId;
+  /** False for roles that never build or run anything (PM). Defaults to true. */
+  readonly install?: boolean;
+  /**
+   * Force LF on checkout. Required under the docker driver: Git-for-Windows
+   * defaults to core.autocrlf=true, and a Linux container then lints and tries
+   * to `exec` CRLF shell scripts.
+   */
+  readonly lineEndings?: 'lf';
+  /**
+   * Builds the executor that runs `checks.install`. A factory, not an instance,
+   * because a container executor needs the worktree path and id, and neither
+   * exists until `acquire` has created them.
+   */
+  readonly executorFor?: (path: string, workspaceId: WorkspaceId) => WorkspaceExecutor;
   readonly log?: (msg: string) => void;
 }
 
@@ -108,10 +122,24 @@ export class WorktreeManager {
       mkdirSync(root, { recursive: true });
       const path = join(root, `${slugDir(input.cardShortId)}-${shortId(id)}`);
 
+      // `-c` before the subcommand so the setting applies to this invocation
+      // only — nothing in the target repo's config is modified.
+      const eol =
+        input.lineEndings === 'lf' ? ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'] : [];
+
       log(`git worktree add ${path} (${branch} @ ${baseSha.slice(0, 8)})`);
-      await this.git.run(repo, ['worktree', 'add', '--no-checkout', '-b', branch, path, baseSha]);
+      await this.git.run(repo, [
+        ...eol,
+        'worktree',
+        'add',
+        '--no-checkout',
+        '-b',
+        branch,
+        path,
+        baseSha,
+      ]);
       try {
-        await this.git.run(path, ['checkout', '--quiet']);
+        await this.git.run(path, [...eol, 'checkout', '--quiet']);
       } catch (err) {
         await this.forceRemove(repo, path, branch);
         throw err;
@@ -119,11 +147,11 @@ export class WorktreeManager {
 
       const copiedIncludes = copyIncludes(repo, path, this.includePatterns, log);
 
-      if (input.project.checks.install) {
+      if (input.project.checks.install && input.install !== false) {
         log(`install: ${input.project.checks.install}`);
-        const r = await runCommand(input.project.checks.install, [], {
+        const executor = input.executorFor?.(path, id) ?? new HostExecutor();
+        const r = await executor.run(input.project.checks.install, {
           cwd: path,
-          shell: true,
           timeoutMs: 10 * 60_000,
           env: { CI: '1' },
         });

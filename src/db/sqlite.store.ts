@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import { type RunId, type TaskId, type WorkspaceId } from '../domain/ids.js';
 import { assertTransition, type TaskState } from '../domain/task.state.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS runs (
   attempt                  INTEGER NOT NULL,
   role                     TEXT NOT NULL,
   driver                   TEXT NOT NULL,
+  container_id             TEXT,
+  image                    TEXT,
   model                    TEXT NOT NULL,
   state                    TEXT NOT NULL CHECK (state IN ('starting','running','finished','interrupted')),
   session_id               TEXT,
@@ -152,6 +154,8 @@ export interface RunRow {
   attempt: number;
   role: string;
   driver: string;
+  container_id: string | null;
+  image: string | null;
   model: string;
   state: 'starting' | 'running' | 'finished' | 'interrupted';
   session_id: string | null;
@@ -215,7 +219,20 @@ export class SqliteStore {
     const applied = this.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {
       v: number | null;
     };
-    if ((applied.v ?? 0) < SCHEMA_VERSION) {
+    const from = applied.v ?? 0;
+
+    // v2: which container and image a run used, for the docker driver.
+    if (from < 2) {
+      for (const column of ['container_id TEXT', 'image TEXT']) {
+        try {
+          this.db.exec(`ALTER TABLE runs ADD COLUMN ${column}`);
+        } catch {
+          // Already present: a fresh database gets these from DDL.
+        }
+      }
+    }
+
+    if (from < SCHEMA_VERSION) {
       this.db
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(SCHEMA_VERSION, now());
@@ -272,6 +289,21 @@ export class SqliteStore {
     const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
     if (!row) throw new Error(`task ${id} not found`);
     return row;
+  }
+
+  /**
+   * Mirrors `ux_one_active_task_per_card`: a card may only have one task in
+   * flight. Callers that create a second task for the same card (the role
+   * handoff) check this rather than letting the index throw.
+   */
+  hasActiveTaskForCard(projectId: string, cardId: string): boolean {
+    return !!this.db
+      .prepare(
+        `SELECT 1 FROM tasks WHERE project_id = ? AND card_id = ?
+           AND state IN ('queued','claimed','preparing','running','verifying','publishing')
+         LIMIT 1`,
+      )
+      .get(projectId, cardId);
   }
 
   listTasks(where?: { state?: TaskState; projectId?: string }): TaskRow[] {

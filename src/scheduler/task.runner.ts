@@ -6,7 +6,13 @@ import { type Role, roleSchema } from '../config/config.schema.js';
 import type { SqliteStore, TaskRow } from '../db/sqlite.store.js';
 import { newRunId, type RunId, type TaskId } from '../domain/ids.js';
 import type { TaskState } from '../domain/task.state.js';
+import { resolveGitDir } from '../exec/docker/gitdir.resolver.js';
 import type { ExecDriver, ExecResult } from '../exec/exec.driver.js';
+import {
+  DockerExecutor,
+  HostExecutor,
+  type WorkspaceExecutor,
+} from '../exec/workspace.executor.js';
 import type {
   BlockedReport,
   Decision,
@@ -17,6 +23,7 @@ import { BOARD_SERVER_KEY, createBoardMcpServer, type TaskView } from '../mcp/bo
 import { publish, PublishAbort } from '../pipeline/post.run.pipeline.js';
 import { buildBoardComment, type ReportInput } from '../pipeline/report.builder.js';
 import { runVerify, type VerifyResult } from '../pipeline/verify.runner.js';
+import { ROLE_DELIVERY } from '../policy/delivery.policy.js';
 import { buildGuardHooks } from '../policy/pretooluse.hook.js';
 import { AGENT_ENV, ROLE_POLICIES } from '../policy/tool.policy.js';
 import { runCommand } from '../process/command.runner.js';
@@ -68,12 +75,26 @@ export async function executeTask(
 ): Promise<ExecuteResult> {
   const { store, worktrees, driver, sink, log } = deps;
   const role = roleSchema.parse(task.role);
+  const delivery = ROLE_DELIVERY[role];
   const agent = project.agents[role];
   const taskId = task.id;
   const labels = JSON.parse(task.labels_json) as string[];
 
   store.transitionTask(taskId, 'claimed', 'preparing');
   sink.onStart(task, `🤖 **${role}** picked up this card (attempt ${task.attempts + 1}).`);
+
+  const containerized = driver.kind === 'docker';
+  // Install and verify must run where the agent runs: a host `pnpm install`
+  // produces win32 native binaries a Linux container cannot load.
+  const executorFor = (workspacePath: string, workspaceId: string): WorkspaceExecutor =>
+    containerized
+      ? new DockerExecutor({
+          cfg: agent.exec.docker,
+          repoPath: project.repo.path,
+          workspaceId,
+          gitDir: resolveGitDir(workspacePath, project.repo.path),
+        })
+      : new HostExecutor();
 
   let workspace: WorkspaceHandle;
   try {
@@ -84,6 +105,9 @@ export async function executeTask(
       cardShortId: task.card_short_id,
       cardTitle: task.title,
       log,
+      install: delivery.install,
+      executorFor,
+      ...(containerized ? { lineEndings: 'lf' as const } : {}),
       ...(task.workspace_id ? { reuseWorkspaceId: task.workspace_id } : {}),
     });
   } catch (err) {
@@ -98,7 +122,13 @@ export async function executeTask(
     branch: workspace.branch,
   });
 
-  const verifyCmd = project.checks.test ?? null;
+  // PM verifies nothing; DEVOPS prefers its own check and falls back to `test`.
+  const verifyCmd =
+    delivery.verifyWith === null
+      ? null
+      : delivery.verifyWith === 'infra'
+        ? (project.checks.infra ?? project.checks.test ?? null)
+        : (project.checks.test ?? null);
   const verifies: VerifyResult[] = [];
   let sessionId: string | null = null;
   let attempt = task.attempts;
@@ -146,6 +176,7 @@ export async function executeTask(
         workspace,
         log,
         sessionId,
+        executor: executorFor(workspace.path, workspace.id),
         onProgress: (p) => sink.onProgress(store.getTask(taskId), runId, p),
         taskView: {
           projectId: project.id,
@@ -191,7 +222,13 @@ export async function executeTask(
 
       store.transitionTask(taskId, 'running', 'verifying');
       log(`[${task.card_short_id}] verify: ${verifyCmd}`);
-      const v = await runVerify(verifyCmd, workspace.path, project.checks.timeoutMinutes);
+      const v = await runVerify(
+        verifyCmd,
+        workspace.path,
+        project.checks.timeoutMinutes,
+        undefined,
+        executorFor(workspace.path, workspace.id),
+      );
       verifies.push(v);
       store.updateRun(runId, { verify_exit_code: v.exitCode, verify_tail: v.outputTail });
       log(
@@ -212,7 +249,12 @@ export async function executeTask(
 
     const canPublish =
       !!outcome?.summary && !outcome.blocked && (verdict === 'review' || verdict === 'needs_human');
-    if (canPublish && !opts.dryRun && outcome?.summary) {
+    if (canPublish && delivery.kind === 'board-only') {
+      // Nothing to commit, branch or open. The summary body IS the deliverable,
+      // and it reaches the card through the report below. `running -> review` is
+      // already a legal edge, so the state machine needs no new one.
+      log('board-only role — no commit, no branch, no pull request');
+    } else if (canPublish && !opts.dryRun && outcome?.summary) {
       const from = store.getTask(taskId).state;
       if (from === 'running' || from === 'verifying')
         store.transitionTask(taskId, from, 'publishing');
@@ -232,10 +274,15 @@ export async function executeTask(
           denials: outcome.denials,
           log,
           wip: verdict === 'needs_human',
+          delivery,
         });
         prUrl = out.prUrl;
         diff = out.diff;
         hooksBypassed = out.hooksBypassed;
+        if (out.kind === 'board-only') {
+          // QA reviewed the branch and changed nothing. That is a success.
+          log('nothing to commit, and this role is allowed to finish without a diff');
+        }
       } catch (err) {
         if (err instanceof PublishAbort) {
           verdict = err.code === 'nothing-to-commit' ? 'failed' : 'needs_human';
@@ -284,6 +331,7 @@ export async function executeTask(
     denials: outcome?.denials ?? [],
     verdict,
     verdictReason: reason,
+    outcome: delivery.kind,
   };
   const comment = buildBoardComment(report);
   sink.onFinish(store.getTask(taskId), verdict, comment);
@@ -317,6 +365,8 @@ interface RunAgentInput {
   taskView: TaskView;
   sessionId: string | null;
   previousFailure: { command: string; exitCode: number | null; outputTail: string } | undefined;
+  /** Runs the target repo's commitlint, in the container under the docker driver. */
+  executor: WorkspaceExecutor;
   onProgress: (p: ProgressReport) => void;
   log: (m: string) => void;
 }
@@ -325,6 +375,7 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
   const { driver, store, project, role, runId, taskId, workspace, log } = input;
   const agent = project.agents[role];
   const policy = ROLE_POLICIES[role];
+  const delivery = ROLE_DELIVERY[role];
 
   let summary: ProposedSummary | null = null;
   let blocked: BlockedReport | null = null;
@@ -348,7 +399,15 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
       store.updateRun(runId, { decisions_json: JSON.stringify(decisions) });
     },
     storeSummary: async (s) => {
-      const errors = await validateCommitWithRepo(workspace.path, s);
+      // Whether a commit is required is a property of the role, not the schema:
+      // a board-only role has nothing to commit and must not be made to invent
+      // a message. The rejection round-trips back to the agent either way.
+      const errors =
+        delivery.requireCommit && !s.commit
+          ? ['this role must supply a `commit` message with its summary']
+          : s.commit
+            ? await validateCommitWithRepo(workspace.path, s, input.executor)
+            : [];
       if (!errors.length) {
         summary = s;
         store.updateRun(runId, { summary_json: JSON.stringify(s) });
@@ -358,8 +417,13 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
     },
   });
 
+  // Under a container driver the agent sees /work, not the host path — the guard
+  // has to judge the paths the agent actually uses, in the right dialect.
+  const agentCwd = driver.paths.toAgent(workspace.path);
   const hooks = buildGuardHooks({
-    root: workspace.path,
+    root: agentCwd,
+    writeGlobs: delivery.writeGlobs,
+    mode: driver.paths.mode,
     onDenial: (toolName, reason, toolInput) => {
       denials.push({ toolName, reason });
       store.appendEvent(runId, taskId, 'denied', { toolName, reason, input: toolInput });
@@ -370,14 +434,22 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
   const session = await driver.start({
     runId,
     cwd: workspace.path,
+    workspaceId: workspace.id,
+    repoPath: project.repo.path,
     additionalReadDirs: [],
     systemPromptAppend: buildSystemAppend(project, role),
     prompt: buildUserPrompt({
       task: input.taskView,
-      worktreePath: workspace.path,
+      worktreePath: agentCwd,
       baseRef: `${project.repo.remote}/${workspace.baseBranch} @ ${workspace.baseSha.slice(0, 8)}`,
       budget: agent.budget,
-      verifyCommand: project.checks.test ?? null,
+      // Delivery-gated, so PM is never told to run a test suite it must not run.
+      verifyCommand:
+        delivery.verifyWith === null
+          ? null
+          : delivery.verifyWith === 'infra'
+            ? (project.checks.infra ?? project.checks.test ?? null)
+            : (project.checks.test ?? null),
       ...(input.previousFailure ? { previousFailure: input.previousFailure } : {}),
     }),
     model: agent.model,
@@ -447,24 +519,36 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
  * subject-case…), so the rejection message comes from the repo's rules.
  * Falls back to the basic Conventional Commits shape otherwise.
  */
-export async function validateCommitWithRepo(cwd: string, s: ProposedSummary): Promise<string[]> {
-  const header = `${s.commit.type}${s.commit.scope ? `(${s.commit.scope})` : ''}: ${s.commit.subject}`;
-  const message = s.commit.body ? `${header}\n\n${s.commit.body}` : header;
+export async function validateCommitWithRepo(
+  cwd: string,
+  s: ProposedSummary,
+  /** Under docker, the repo's commitlint is a Linux binary in the container. */
+  executor?: WorkspaceExecutor,
+): Promise<string[]> {
+  // A role that is not required to commit has nothing to validate here.
+  const commit = s.commit;
+  if (!commit) return [];
+  const header = `${commit.type}${commit.scope ? `(${commit.scope})` : ''}: ${commit.subject}`;
+  const message = commit.body ? `${header}\n\n${commit.body}` : header;
 
-  const bin = join(
-    cwd,
-    'node_modules',
-    '.bin',
-    process.platform === 'win32' ? 'commitlint.cmd' : 'commitlint',
-  );
-  if (existsSync(bin)) {
-    const r = await runCommand(bin, [], {
-      cwd,
-      shell: true,
-      timeoutMs: 60_000,
-      env: { CI: '1' },
-      input: message,
-    });
+  // In the container the binary is the posix one, at the same relative path.
+  const relBin = join('node_modules', '.bin', 'commitlint');
+  const hostBin = join(cwd, relBin + (process.platform === 'win32' ? '.cmd' : ''));
+  if (existsSync(join(cwd, relBin)) || existsSync(hostBin)) {
+    const r = executor
+      ? // `sh -lc` in the container: stdin carries the message, as commitlint expects.
+        await executor.run(`printf '%s' "$COMMIT_MSG" | ${relBin}`, {
+          cwd,
+          timeoutMs: 60_000,
+          env: { CI: '1', COMMIT_MSG: message },
+        })
+      : await runCommand(hostBin, [], {
+          cwd,
+          shell: true,
+          timeoutMs: 60_000,
+          env: { CI: '1' },
+          input: message,
+        });
     if (r.exitCode === 0) return [];
     const errors = r.output
       .split(/\r?\n/)
@@ -476,9 +560,8 @@ export async function validateCommitWithRepo(cwd: string, s: ProposedSummary): P
 
   const errors: string[] = [];
   if (header.length > 100) errors.push(`header is ${header.length} chars (max 100)`);
-  if (/^[A-Z]/.test(s.commit.subject))
-    errors.push('subject must not start with an uppercase letter');
-  if (/\.$/.test(s.commit.subject)) errors.push('subject must not end with a period');
+  if (/^[A-Z]/.test(commit.subject)) errors.push('subject must not start with an uppercase letter');
+  if (/\.$/.test(commit.subject)) errors.push('subject must not end with a period');
   return errors;
 }
 

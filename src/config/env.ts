@@ -18,6 +18,15 @@ export const orchestratorEnvSchema = z.object({
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
   ANTHROPIC_API_KEY: optionalText,
   GH_TOKEN: optionalText,
+  /**
+   * Webhook receiver. The public URL is not in YAML because it changes with
+   * every tunnel, and the path secret is a secret.
+   */
+  ORCHESTRATOR_WEBHOOK_HOST: z.string().min(1).default('127.0.0.1'),
+  ORCHESTRATOR_WEBHOOK_PORT: z.coerce.number().int().min(1).max(65535).default(7788),
+  ORCHESTRATOR_WEBHOOK_PUBLIC_URL: optionalText,
+  ORCHESTRATOR_WEBHOOK_PATH_PREFIX: z.string().min(1).default('/hooks/trello'),
+  ORCHESTRATOR_WEBHOOK_PATH_SECRET: optionalText,
 });
 
 export type OrchestratorEnv = Readonly<z.infer<typeof orchestratorEnvSchema>>;

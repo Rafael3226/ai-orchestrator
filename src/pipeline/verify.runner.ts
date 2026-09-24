@@ -1,4 +1,4 @@
-import { runCommand } from '../process/command.runner.js';
+import { HostExecutor, type WorkspaceExecutor } from '../exec/workspace.executor.js';
 
 export interface VerifyResult {
   readonly command: string;
@@ -18,10 +18,11 @@ export async function runVerify(
   cwd: string,
   timeoutMinutes: number,
   onLine?: (line: string) => void,
+  /** Runs in the container under the docker driver; see workspace.executor.ts. */
+  executor: WorkspaceExecutor = new HostExecutor(),
 ): Promise<VerifyResult> {
-  const r = await runCommand(command, [], {
+  const r = await executor.run(command, {
     cwd,
-    shell: true,
     timeoutMs: timeoutMinutes * 60_000,
     tailBytes: 16 * 1024,
     env: { CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', TURBO_TELEMETRY_DISABLED: '1' },

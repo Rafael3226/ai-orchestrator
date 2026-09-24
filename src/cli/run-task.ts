@@ -3,7 +3,8 @@ import { type Role, roleSchema } from '../config/config.schema.js';
 import { loadOrchestratorEnv } from '../config/env.js';
 import { SqliteStore } from '../db/sqlite.store.js';
 import { newTaskId } from '../domain/ids.js';
-import { LocalDriver } from '../exec/local.driver.js';
+import { createDriver } from '../exec/driver.factory.js';
+import type { DriverKind } from '../exec/exec.driver.js';
 import { executeTask, type TaskSink } from '../scheduler/task.runner.js';
 import { WorktreeManager } from '../workspace/worktree.manager.js';
 
@@ -17,6 +18,8 @@ export interface RunTaskOptions {
   readonly labels?: readonly string[];
   readonly dryRun?: boolean;
   readonly keepWorkspace?: boolean;
+  /** Overrides the project's exec.driver for this one run. */
+  readonly driver?: DriverKind;
 }
 
 /**
@@ -33,7 +36,11 @@ export async function runTask(opts: RunTaskOptions): Promise<number> {
   }
 
   const store = new SqliteStore(env.ORCHESTRATOR_DB);
-  const driver = new LocalDriver();
+  // `--driver` overrides the project's own `exec.driver` for this one run.
+  const exec = opts.driver
+    ? { ...project.agents[role].exec, driver: opts.driver }
+    : project.agents[role].exec;
+  const driver = createDriver(exec, { bootId: `run-task-${Date.now()}`, log: console.log });
   await driver.preflight();
   const log = (msg: string) => console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`);
 

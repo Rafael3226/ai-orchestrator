@@ -16,6 +16,7 @@ import type {
   ExecSession,
 } from '../exec/exec.driver.js';
 import { FakeBoardSource } from '../testing/fake.board.source.js';
+import { aSummary, ScriptedDriver } from '../testing/scripted.driver.js';
 
 import { Orchestrator } from './orchestrator.js';
 
@@ -25,6 +26,7 @@ const git = (cwd: string, ...args: string[]) =>
 /** A driver that "works" instantly: no Claude, no cost. It never calls propose_summary, so the task lands in needs_human without publishing. */
 class FakeDriver implements ExecDriver {
   readonly kind = 'local' as const;
+  readonly paths = { mode: 'native' as const, toAgent: (p: string) => p };
   readonly specs: ExecRunSpec[] = [];
   async preflight(): Promise<void> {}
   async start(spec: ExecRunSpec): Promise<ExecSession> {
@@ -216,4 +218,168 @@ describe('Orchestrator end to end (fake board, fake driver, real git)', () => {
     expect(store.listWorkspaces('demo')[0]?.state).toBe('retained');
     store.close();
   }, 60_000);
+});
+
+const chainYaml = (repoPath: string, wt: string) => `
+version: 1
+defaults: { concurrency: { global: 2, perProject: 1 } }
+projects:
+  - id: demo
+    name: Demo
+    repo: { path: ${JSON.stringify(repoPath)}, worktreeRoot: ${JSON.stringify(wt)}, githubRepo: me/demo }
+    board:
+      provider: trello
+      boardId: b1
+      credentials: TRELLO_X
+      botMemberId: bot
+      poll: { intervalSeconds: 5, reconcileEveryTicks: 100, reconcileOnStart: false }
+      columns:
+        ready: Ready for Dev
+        inProgress: In Progress
+        review: In Review
+        done: Done
+        blocked: Blocked
+    agents:
+      DEV-BE: { enabled: true }
+      QA:
+        enabled: true
+        writeback:
+          onSuccess: { move: done, comment: report, addLabel: qa-passed }
+    routes:
+      - when: { list: Ready for Dev, label: be }
+        agent: DEV-BE
+      - when: { list: In Review }
+        agent: QA
+    writeback:
+      onStart:   { move: inProgress, assign: bot, comment: started }
+      onSuccess: { move: review, comment: report }
+      onFailure: { move: blocked, comment: report }
+`;
+
+describe('role handoff end to end', () => {
+  it('DEV-BE finishing wakes QA on the same card, with no human touching the board', async () => {
+    const store = new SqliteStore(':memory:');
+    const boardStore = new BoardStore(store);
+    const board = new FakeBoardSource(
+      'b1',
+      ['Backlog', 'Ready for Dev', 'In Progress', 'In Review', 'Done', 'Blocked'],
+      ['be', 'qa-passed'],
+    );
+
+    // Attempt 1 is DEV-BE (writes code), attempt 2 is QA (reviews, changes nothing).
+    const driver = new ScriptedDriver([
+      {
+        work: (cwd) => writeFileSync(join(cwd, 'thing.ts'), 'export const thing = 1;\n'),
+        calls: [['propose_summary', aSummary()]],
+      },
+      {
+        calls: [
+          [
+            'propose_summary',
+            {
+              title: 'Review of the thing',
+              summary: 'Implementation matches the card. One nit.',
+              testPlan: 'Ran the suite.',
+              filesTouched: [],
+              findings: [
+                { severity: 'nit', title: 'Naming could be clearer', detail: 'thing is vague.' },
+              ],
+              commit: { type: 'test', subject: 'review the thing' },
+            },
+          ],
+        ],
+      },
+    ]);
+
+    const loaded = loadConfigFromString(chainYaml(repo, join(base, 'wt')), 'x');
+    const project = loaded.project('demo');
+
+    const { BoardSync } = await import('../board/board.sync.js');
+    const { BoardWriter } = await import('../board/board.writer.js');
+    const { WorktreeManager } = await import('../workspace/worktree.manager.js');
+    const { executeTask } = await import('./task.runner.js');
+
+    const sync = new BoardSync(project, board, store, boardStore, quiet);
+    const moved: string[] = [];
+    const writer = new BoardWriter(project, board, boardStore, sync.router, quiet, {
+      onMoved: (cardId) => moved.push(cardId),
+    });
+    const worktrees = new WorktreeManager(store, []);
+
+    const run = async (t: (typeof store.listTasks extends () => infer R ? R : never)[number]) => {
+      const writeback = project.agents[t.role as 'DEV-BE' | 'QA'].writeback;
+      const claimed = store.transitionTask(t.id, 'queued', 'claimed');
+      return executeTask(
+        {
+          store,
+          worktrees,
+          driver,
+          log: () => {},
+          sink: {
+            onStart: (tk, c) =>
+              writer.enqueueStep('onStart', writeback.onStart, tk.id, tk.card_id, c),
+            onProgress: () => {},
+            onFinish: (tk, verdict, c) => {
+              boardStore.saveReport(tk.id, verdict, c);
+              const step = verdict === 'review' ? 'onSuccess' : 'onFailure';
+              writer.enqueueStep(step, writeback[step], tk.id, tk.card_id, c);
+            },
+          },
+        },
+        project,
+        claimed,
+        { dryRun: true, keepWorkspace: true },
+      );
+    };
+
+    await sync.tick(); // cold start
+    const card = board.addCard('42', 'Add a thing', 'Backlog', {
+      description: 'Please add the thing.',
+      labels: ['be'],
+    });
+    board.humanMove(card.id, 'Ready for Dev');
+
+    // 1. The human's move dispatches DEV-BE.
+    expect((await sync.tick()).dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    const beTask = store.listTasks({ state: 'queued' })[0]!;
+    expect((await run(beTask)).verdict).toBe('review');
+
+    // 2. Draining the outbox performs OUR move to In Review and reports it.
+    await writer.drain(await sync.getTopology());
+    expect((await board.getCard(card.id)).columnId).toBe(board.columnId('In Review'));
+    expect(moved).toContain(card.id);
+
+    // 3. That move is our own echo — an ordinary poll refuses to act on it...
+    const pollAfterMove = await sync.tick();
+    expect(pollAfterMove.dispatched).toHaveLength(0);
+    expect(pollAfterMove.skipped.some((s) => s.reason === 'own writeback')).toBe(true);
+
+    // ...but the handoff dispatches QA, which is the whole point.
+    const handed = await sync.handoff(card.id);
+    expect(handed?.role).toBe('QA');
+
+    // 4. QA runs, finds only a nit, and commits nothing.
+    const qaTask = store.listTasks({ state: 'queued' })[0]!;
+    expect(qaTask.role).toBe('QA');
+    const qaResult = await run(qaTask);
+    expect(qaResult.verdict).toBe('review');
+    expect(qaResult.comment).toContain('## Findings');
+
+    // 5. QA's own overlay moves the card to Done, not back to In Review.
+    await writer.drain(await sync.getTopology());
+    expect((await board.getCard(card.id)).columnId).toBe(board.columnId('Done'));
+    expect((await board.getCard(card.id)).labelNames).toContain('qa-passed');
+
+    // Two roles, two tasks, one card, one unattended chain.
+    const tasks = store.listTasks();
+    expect(tasks.map((t) => t.role).sort()).toEqual(['DEV-BE', 'QA']);
+    expect(tasks.every((t) => t.state === 'review')).toBe(true);
+
+    // And it settles: nothing dispatches again.
+    expect((await sync.tick()).dispatched).toHaveLength(0);
+    expect(await sync.handoff(card.id)).toBeNull();
+    expect(boardStore.outboxCounts().done).toBeGreaterThan(0);
+
+    store.close();
+  }, 90_000);
 });

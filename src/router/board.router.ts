@@ -50,7 +50,7 @@ export class BoardRouter {
     // token), so a bot-authored event is only an echo when it OCCURRED within a few seconds of
     // our own writeback to that card — compared on the event's timestamp, not on poll time, so
     // the poll interval does not matter. Outside that window the same account is a human.
-    if (!event.synthetic && this.isEcho(event.cardId, event.occurredAt)) {
+    if (!event.synthetic && !event.handoff && this.isEcho(event.cardId, event.occurredAt)) {
       if (!event.actorMemberId || event.actorMemberId === p.board.botMemberId) {
         return { kind: 'skip', reason: 'own writeback' };
       }
@@ -82,16 +82,18 @@ export class BoardRouter {
       if (!p.agents[route.agent].enabled) {
         return { kind: 'skip', reason: `${route.id} matched but ${route.agent} is disabled` };
       }
-      if (event.synthetic && this.boardStore.hasAnyLedgerForCard(p.id, card.id)) {
+      if (event.synthetic && !event.handoff && this.boardStore.hasAnyLedgerForCard(p.id, card.id)) {
         return { kind: 'skip', reason: 'reconcile: card already has a ledger entry' };
       }
+      // Per ROLE: a PM -> DEV -> QA chain on one card is legitimate and must
+      // not trip a breaker meant to catch one role dispatching over and over.
       if (
-        this.boardStore.recentDispatchCount(p.id, card.id, CIRCUIT_WINDOW_MS) >=
+        this.boardStore.recentDispatchCount(p.id, card.id, CIRCUIT_WINDOW_MS, route.agent) >=
         CIRCUIT_MAX_DISPATCHES
       ) {
         return {
           kind: 'skip',
-          reason: `circuit breaker: >${CIRCUIT_MAX_DISPATCHES} dispatches for this card in the last hour`,
+          reason: `circuit breaker: >${CIRCUIT_MAX_DISPATCHES} ${route.agent} dispatches for this card in the last hour`,
         };
       }
 
@@ -219,6 +221,7 @@ export function syntheticArrival(
   project: ProjectConfig,
   card: BoardCard,
   topology: BoardTopology,
+  opts: { handoff?: boolean } = {},
 ): BoardEvent | null {
   const routed = project.routes.some(
     (r) =>
@@ -242,6 +245,7 @@ export function syntheticArrival(
     memberId: null,
     card,
     synthetic: true,
+    ...(opts.handoff ? { handoff: true } : {}),
   };
 }
 

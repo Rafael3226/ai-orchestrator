@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS writeback_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_due ON writeback_outbox (state, next_attempt_at, id);
 
+-- Webhook liveness. Written by the receiver, read by the status command, which
+-- runs in a different process and so cannot see the in-memory buffer.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  project_id       TEXT PRIMARY KEY,
+  registered_id    TEXT,
+  callback_url     TEXT,
+  last_delivery_at TEXT,
+  delivered        INTEGER NOT NULL DEFAULT 0,
+  rejected         INTEGER NOT NULL DEFAULT 0,
+  dropped          INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS task_reports (
   task_id    TEXT PRIMARY KEY,
   verdict    TEXT NOT NULL,
@@ -64,6 +76,17 @@ CREATE TABLE IF NOT EXISTS task_reports (
 `;
 
 export type OutboxOp = 'move' | 'comment' | 'add-label' | 'remove-label' | 'assign';
+
+export type DeliveryCounter = 'delivered' | 'rejected' | 'dropped';
+
+export interface WebhookStats {
+  registeredId: string | null;
+  callbackUrl: string | null;
+  lastDeliveryAt: string | null;
+  delivered: number;
+  rejected: number;
+  dropped: number;
+}
 
 export interface OutboxRow {
   id: number;
@@ -118,6 +141,60 @@ export class BoardStore {
       .run({ projectId, cursor, ts: now(), rec: reconciled ? 1 : 0 });
   }
 
+  // webhook liveness
+
+  noteWebhookRegistration(projectId: string, id: string | null, callbackUrl: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (project_id, registered_id, callback_url)
+         VALUES (@projectId, @id, @url)
+         ON CONFLICT(project_id) DO UPDATE SET
+           registered_id = excluded.registered_id, callback_url = excluded.callback_url`,
+      )
+      .run({ projectId, id, url: callbackUrl });
+  }
+
+  /** One synchronous UPSERT — cheap enough to call from the request handler. */
+  noteWebhookDelivery(projectId: string, counter: DeliveryCounter): void {
+    const column = counter;
+    this.db
+      .prepare(
+        `INSERT INTO webhook_deliveries (project_id, last_delivery_at, ${column})
+         VALUES (@projectId, @ts, 1)
+         ON CONFLICT(project_id) DO UPDATE SET
+           last_delivery_at = excluded.last_delivery_at,
+           ${column} = webhook_deliveries.${column} + 1`,
+      )
+      .run({ projectId, ts: now() });
+  }
+
+  getWebhookStats(projectId: string): WebhookStats | null {
+    const row = this.db
+      .prepare(
+        `SELECT registered_id, callback_url, last_delivery_at, delivered, rejected, dropped
+         FROM webhook_deliveries WHERE project_id = ?`,
+      )
+      .get(projectId) as
+      | {
+          registered_id: string | null;
+          callback_url: string | null;
+          last_delivery_at: string | null;
+          delivered: number;
+          rejected: number;
+          dropped: number;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      registeredId: row.registered_id,
+      callbackUrl: row.callback_url,
+      lastDeliveryAt: row.last_delivery_at,
+      delivered: row.delivered,
+      rejected: row.rejected,
+      dropped: row.dropped,
+    };
+  }
+
   /** Returns false if this event id was already processed. */
   markEventSeen(projectId: string, eventId: string): boolean {
     const info = this.db
@@ -156,13 +233,16 @@ export class BoardStore {
       .prepare('SELECT 1 FROM dispatch_ledger WHERE project_id = ? AND card_id = ? LIMIT 1')
       .get(projectId, cardId);
   }
-  recentDispatchCount(projectId: string, cardId: string, withinMs: number): number {
+  /** `role` scopes the circuit breaker so a legitimate PM -> DEV -> QA chain does not trip it. */
+  recentDispatchCount(projectId: string, cardId: string, withinMs: number, role?: string): number {
     const since = new Date(Date.now() - withinMs).toISOString();
     const row = this.db
       .prepare(
-        'SELECT COUNT(*) AS n FROM dispatch_ledger WHERE project_id = ? AND card_id = ? AND created_at >= ?',
+        `SELECT COUNT(*) AS n FROM dispatch_ledger
+         WHERE project_id = ? AND card_id = ? AND created_at >= ?
+           AND (? IS NULL OR role = ?)`,
       )
-      .get(projectId, cardId, since) as { n: number };
+      .get(projectId, cardId, since, role ?? null, role ?? null) as { n: number };
     return row.n;
   }
   insertLedger(e: {

@@ -9,10 +9,29 @@ import type { RunId } from '../domain/ids.js';
 
 export type DriverKind = 'local' | 'docker';
 
+/**
+ * How host paths appear to the agent, and which dialect the guards must speak.
+ *
+ * Under Docker the agent sees `/work`, not `D:ow\...`. Two things break if
+ * this is not threaded through: the user prompt tells the agent to work in a
+ * path that does not exist inside the container, and `path.guard` resolves
+ * `/work/src/x.ts` against the current Windows drive — containment then holds
+ * only by accident, and `bash.guard`'s MSYS translation actively corrupts it.
+ */
+export interface PathMapping {
+  readonly mode: 'native' | 'posix';
+  /** Host path -> the path the agent sees. Identity for the local driver. */
+  toAgent(hostPath: string): string;
+}
+
 export interface ExecRunSpec {
   readonly runId: RunId;
   /** Absolute host path of the worktree. Local uses it as cwd; Docker bind-mounts it. */
   readonly cwd: string;
+  /** Names the per-workspace volumes a container driver creates. */
+  readonly workspaceId: string;
+  /** Host path of the PARENT repo — Docker mounts its `.git` so worktrees work. */
+  readonly repoPath: string;
   readonly additionalReadDirs: readonly string[];
 
   /** Byte-stable per (project, role) so the prompt cache hits across worktrees. */
@@ -117,6 +136,7 @@ export interface ExecSession {
 
 export interface ExecDriver {
   readonly kind: DriverKind;
+  readonly paths: PathMapping;
   /** Fail fast at boot: binary present, auth present, docker daemon up, etc. */
   preflight(): Promise<void>;
   start(spec: ExecRunSpec): Promise<ExecSession>;

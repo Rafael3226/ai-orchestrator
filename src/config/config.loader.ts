@@ -5,9 +5,12 @@ import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
+import type { DriverKind } from '../exec/exec.driver.js';
+
 import {
   type AgentSettings,
   type Budget,
+  type DockerConfig,
   orchestratorConfigSchema,
   type OrchestratorConfigRaw,
   type ProjectConfigRaw,
@@ -27,6 +30,15 @@ const BUILTIN_AGENT_DEFAULTS: Record<Role, AgentSettings> = {
 
 export interface ResolvedAgent extends AgentSettings {
   readonly enabled: boolean;
+  /** The project's writeback with this role's overlay applied, per step. */
+  readonly writeback: ProjectConfigRaw['writeback'];
+  /** Fully resolved: builtin -> defaults.exec -> projects[].exec -> agents.<ROLE>.docker. */
+  readonly exec: ResolvedExec;
+}
+
+export interface ResolvedExec {
+  readonly driver: DriverKind;
+  readonly docker: DockerConfig;
 }
 
 export interface ResolvedRoute extends Omit<RouteConfig, 'when'> {
@@ -49,7 +61,7 @@ export interface OrchestratorConfig extends Omit<OrchestratorConfigRaw, 'project
 
 export interface ConfigDiagnostic {
   readonly level: 'warn';
-  readonly code: 'route-to-disabled-agent' | 'route-shadowed';
+  readonly code: 'route-to-disabled-agent' | 'route-shadowed' | 'webhook-redundant-polling';
   readonly projectId?: string;
   readonly message: string;
 }
@@ -170,19 +182,65 @@ function normalizeProject(
     }
   }
 
-  // Writeback: every `move:` alias must be declared, and moving cards needs the loop guard.
+  // With push delivery the poller is a reconcile safety net, not the hot path.
+  // Polling every few seconds on top of it just burns the shared token budget.
+  if (p.board.webhook.enabled && p.board.poll.intervalSeconds < 60) {
+    diagnostics.push({
+      level: 'warn',
+      code: 'webhook-redundant-polling',
+      projectId: p.id,
+      message:
+        `webhooks are enabled but poll.intervalSeconds is ${p.board.poll.intervalSeconds} — ` +
+        'the webhook carries the latency, so raise it (120s is the recommended profile) ' +
+        'and keep reconcileEveryTicks around 5',
+    });
+  }
+
+  // Writeback: every `move:` alias must be declared, and moving cards needs the
+  // loop guard. Role overlays are walked too, or an undeclared alias or a
+  // missing botMemberId could hide inside one.
   const aliases = new Set(Object.keys(p.board.columns));
   let moves = false;
-  for (const [stepName, step] of Object.entries(p.writeback)) {
-    if (step.move !== undefined) {
+  const checkSteps = (
+    where: string,
+    steps: Record<string, { move?: string | undefined } | undefined>,
+  ): void => {
+    for (const [stepName, step] of Object.entries(steps)) {
+      if (step?.move === undefined) continue;
       moves = true;
       if (!aliases.has(step.move)) {
         errors.push(
-          `projects.${p.id}.writeback.${stepName}.move: "${step.move}" is not declared under board.columns`,
+          `projects.${p.id}.${where}.${stepName}.move: "${step.move}" is not declared under board.columns`,
+        );
+      }
+    }
+  };
+  checkSteps('writeback', p.writeback);
+  for (const role of ROLES) {
+    const overlay = p.agents[role]?.writeback;
+    if (overlay) checkSteps(`agents.${role}.writeback`, overlay);
+  }
+
+  // A role whose writeback lands the card back in a column routed to itself
+  // would run forever. This is the guard for the handoff bypass below.
+  for (const role of ROLES) {
+    if (!agents[role].enabled) continue;
+    for (const [stepName, step] of Object.entries(agents[role].writeback)) {
+      if (step.move === undefined) continue;
+      const column = p.board.columns[step.move];
+      if (!column) continue;
+      const selfRoute = routes.find(
+        (r) => r.agent === role && r.enabled && normColumn(r.when.column) === normColumn(column),
+      );
+      if (selfRoute) {
+        errors.push(
+          `projects.${p.id}.agents.${role}.writeback.${stepName}.move: "${step.move}" resolves to ` +
+            `"${column}", which ${selfRoute.id} routes back to ${role} — that is a dispatch loop`,
         );
       }
     }
   }
+
   if (moves && !p.board.botMemberId) {
     errors.push(
       `projects.${p.id}.board.botMemberId is required when writeback moves cards (loop guard)`,
@@ -201,6 +259,14 @@ function resolveAgent(role: Role, root: OrchestratorConfigRaw, p: ProjectConfigR
   const builtin = BUILTIN_AGENT_DEFAULTS[role];
   const global: Partial<AgentDefaults> = root.defaults.agents[role] ?? {};
   const local: Partial<AgentOverride> = p.agents[role] ?? {};
+  const exec = resolveExec(root, p, local);
+  const overlay = local.writeback ?? {};
+  const writeback = {
+    onStart: overlay.onStart ?? p.writeback.onStart,
+    onSuccess: overlay.onSuccess ?? p.writeback.onSuccess,
+    onFailure: overlay.onFailure ?? p.writeback.onFailure,
+    onBlocked: overlay.onBlocked ?? p.writeback.onBlocked,
+  };
   const budget: Budget = {
     ...builtin.budget,
     ...stripUndefined(global.budget ?? {}),
@@ -212,7 +278,30 @@ function resolveAgent(role: Role, root: OrchestratorConfigRaw, p: ProjectConfigR
     enabled: local.enabled ?? false,
     model: local.model ?? global.model ?? builtin.model,
     budget,
+    writeback,
+    exec,
     ...(systemPromptFile !== undefined ? { systemPromptFile } : {}),
+  };
+}
+
+/**
+ * Four levels, narrowest last, mirroring `resolveAgent`: schema defaults, then
+ * `defaults.exec`, then the project's `exec`, then the role's `docker` overlay.
+ * `stripUndefined` throughout so a partial overlay can never erase a default.
+ */
+function resolveExec(
+  root: OrchestratorConfigRaw,
+  p: ProjectConfigRaw,
+  local: Partial<AgentOverride>,
+): ResolvedExec {
+  const docker = {
+    ...root.defaults.exec.docker,
+    ...stripUndefined(p.exec?.docker ?? {}),
+    ...stripUndefined(local.docker ?? {}),
+  } as DockerConfig;
+  return {
+    driver: p.exec?.driver ?? root.defaults.exec.driver,
+    docker,
   };
 }
 

@@ -1,12 +1,14 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 
 import type {
+  DriverKind,
   ExecDriver,
   ExecEvent,
   ExecOutcome,
   ExecResult,
   ExecRunSpec,
   ExecSession,
+  PathMapping,
 } from '../exec/exec.driver.js';
 import { BOARD_SERVER_KEY } from '../mcp/board.server.js';
 
@@ -50,12 +52,25 @@ export interface ScriptedAttempt {
  * An `ExecDriver` that replays a script instead of running Claude: no network,
  * no cost, one entry per attempt so retries can differ from first tries.
  */
+export interface ScriptedDriverOptions {
+  /** Lets a runner test exercise the posix-guard and container-path branches. */
+  readonly kind?: DriverKind;
+  readonly paths?: PathMapping;
+}
+
 export class ScriptedDriver implements ExecDriver {
-  readonly kind = 'local' as const;
+  readonly kind: DriverKind;
+  readonly paths: PathMapping;
   readonly specs: ExecRunSpec[] = [];
   private index = 0;
 
-  constructor(private readonly attempts: readonly ScriptedAttempt[]) {}
+  constructor(
+    private readonly attempts: readonly ScriptedAttempt[],
+    opts: ScriptedDriverOptions = {},
+  ) {
+    this.kind = opts.kind ?? 'local';
+    this.paths = opts.paths ?? { mode: 'native', toAgent: (x) => x };
+  }
 
   async preflight(): Promise<void> {}
 

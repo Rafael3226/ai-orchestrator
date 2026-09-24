@@ -15,6 +15,18 @@ defaults:
   pr:
     draft: true
     labels: [ai-generated]
+  # Where agents run. `local` runs the CLI on this machine against the worktree;
+  # `docker` runs it in a container with the worktree bind-mounted at /work.
+  # See docs/docker.md — especially nodeModulesVolume for pnpm workspaces.
+  exec:
+    driver: local
+    docker:
+      image: ai-orchestrator/agent:latest
+      pullPolicy: missing
+      network: bridge # `none` only suits roles that never install anything
+      cpus: 2
+      memoryMb: 4096
+      nodeModulesVolume: true # set false for a pnpm-workspace monorepo
 
 office:
   roomsPerRow: 1 # 1 = one floor per project, stacked
@@ -32,6 +44,8 @@ projects:
     checks:
       install: pnpm install --frozen-lockfile --prefer-offline
       test: pnpm turbo run test
+      # Optional. DEVOPS verifies with this instead of `test` when present.
+      # infra: pnpm run ci:validate
       required: [test]
       timeoutMinutes: 15
     board:
@@ -42,6 +56,17 @@ projects:
       poll:
         intervalSeconds: 15
         reconcileEveryTicks: 40
+      # Push delivery. With this on, raise intervalSeconds to ~120 and lower
+      # reconcileEveryTicks to ~5: the webhook carries the latency and the
+      # poller becomes the reconcile safety net. The public URL and the API
+      # secret live in .env — they change per tunnel, and secrets never go here.
+      webhook:
+        enabled: false
+        manageRegistration: true
+        # true for dev tunnels: the URL dies with the process, and Trello caps
+        # webhooks per token, so leaving dead ones registered eventually blocks
+        # new registrations.
+        deleteOnShutdown: false
       columns:
         backlog: Backlog
         ready: Ready for Dev
@@ -49,14 +74,44 @@ projects:
         review: In Review
         blocked: Blocked
         done: Done
+    # Per project (and per role, via agents.<ROLE>.docker) this overlays
+    # defaults.exec — only the keys you name.
+    # exec: { driver: docker, docker: { memoryMb: 8192 } }
     agents:
       DEV-BE: { enabled: true }
-      QA: { enabled: false }
+      DEV-FE: { enabled: true }
+      DEVOPS: { enabled: false }
+      PM:
+        enabled: false
+        # PM produces a spec, not code: its success sends the card onward to
+        # Ready for Dev rather than to review.
+        writeback:
+          onSuccess:
+            move: ready
+            comment: report
+            addLabel: spec-ready
+            removeLabel: needs-spec
+      QA:
+        enabled: false
+        # QA is routed on In Review, so its own writeback must NOT move the card
+        # back there — the loader rejects that as a dispatch loop.
+        writeback:
+          onSuccess: { move: done, comment: report, addLabel: qa-passed }
+          onFailure: { move: ready, comment: report, addLabel: qa-findings }
+    # First match wins after the priority sort, so the column-only QA route is
+    # listed last — otherwise it would shadow the label routes above it.
     routes:
+      - when: { list: Backlog, label: needs-spec }
+        agent: PM
       - when: { list: Ready for Dev, label: be }
         agent: DEV-BE
+      - when: { list: Ready for Dev, label: fe }
+        agent: DEV-FE
+      - when: { list: Ready for Dev, label: infra }
+        agent: DEVOPS
       - when: { list: In Review }
         agent: QA
+    # The project default; each role may overlay individual steps above.
     writeback:
       onStart: { move: inProgress, assign: bot, comment: started }
       onSuccess: { move: review, comment: report }
