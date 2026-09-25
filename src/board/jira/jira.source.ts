@@ -6,7 +6,16 @@ import {
   type BoardPollResult,
   type BoardSource,
 } from '../board.source.js';
-import type { BoardCard, BoardComment, BoardEvent, BoardTopology } from '../board.types.js';
+import type {
+  BoardCard,
+  BoardComment,
+  BoardEvent,
+  BoardTopology,
+  CardFields,
+  NewCard,
+  Priority,
+  WorkItemType,
+} from '../board.types.js';
 import { markdownToAdf } from '../format/adf.js';
 import { RateLimiter } from '../http/rate.limiter.js';
 import { basicAuth, RestClient } from '../http/rest.client.js';
@@ -30,6 +39,38 @@ const PAGE = 100;
 const OVERLAP_MS = 2 * 60_000;
 /** Jira bodies are capped at 32k characters. */
 const MAX_COMMENT = 32_000;
+
+/**
+ * Company-managed defaults. Team-managed projects name the sub-task type
+ * `Subtask`; set `board.cardTypes.subtask: Subtask` there.
+ */
+const DEFAULT_TYPES: Readonly<Record<WorkItemType, string>> = {
+  story: 'Story',
+  bug: 'Bug',
+  task: 'Task',
+  subtask: 'Sub-task',
+  epic: 'Epic',
+};
+
+/** Jira's default priority scheme names. */
+const PRIORITY_NAMES: Readonly<Record<Priority, string>> = {
+  highest: 'Highest',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  lowest: 'Lowest',
+};
+
+/**
+ * Story points and start date are custom fields whose ids vary per site;
+ * these are the usual Jira Cloud ones. Override with `board.fields`.
+ */
+const DEFAULT_FIELDS = {
+  priority: 'priority',
+  storyPoints: 'customfield_10016',
+  startDate: 'customfield_10015',
+  dueDate: 'duedate',
+} as const;
 
 /**
  * Jira Cloud rate-limits by a per-account cost budget and answers 429 with
@@ -64,13 +105,17 @@ export class JiraSource implements BoardSource {
     canAddLabel: true,
     labelsAreFreeform: true,
     canRegisterWebhook: false,
+    canCreateCard: true,
+    canCreateSubtask: true,
+    canSetFields: true,
   };
   private readonly http: RestClient;
   private statuses: { id: string; name: string; category: string }[] = [];
 
   constructor(
     readonly boardId: string,
-    private readonly board: Pick<JiraBoardConfig, 'site' | 'projectKey' | 'issueTypes' | 'jql'>,
+    private readonly board: Pick<JiraBoardConfig, 'site' | 'projectKey' | 'issueTypes' | 'jql'> &
+      Partial<Pick<JiraBoardConfig, 'fields' | 'cardTypes'>>,
     cred: JiraCredential,
     private readonly opts: JiraSourceOptions = {},
   ) {
@@ -233,6 +278,64 @@ export class JiraSource implements BoardSource {
     });
   }
 
+  async createCard(card: NewCard): Promise<BoardCard> {
+    const fields: Record<string, unknown> = {
+      project: { key: this.board.projectKey },
+      summary: card.title,
+      description: markdownToAdf(card.description.slice(0, MAX_COMMENT)),
+      issuetype: { name: this.board.cardTypes?.[card.type] ?? DEFAULT_TYPES[card.type] },
+    };
+    if (card.parentId) fields['parent'] = issueRef(card.parentId);
+    const created = await this.http.post<{ id: string; key: string }>('/issue', {
+      body: { fields },
+    });
+    // Jira creates in the workflow's initial status; the writer moves it after.
+    return this.getCard(created.id);
+  }
+
+  async setFields(cardId: string, fields: CardFields): Promise<readonly (keyof CardFields)[]> {
+    const o = this.board.fields ?? {};
+    const ids: Record<keyof CardFields, string> = {
+      priority: o.priority ?? DEFAULT_FIELDS.priority,
+      storyPoints: o.storyPoints ?? DEFAULT_FIELDS.storyPoints,
+      startDate: o.startDate ?? DEFAULT_FIELDS.startDate,
+      dueDate: o.dueDate ?? DEFAULT_FIELDS.dueDate,
+    };
+    const body: Record<string, unknown> = {};
+    const byFieldId = new Map<string, keyof CardFields>();
+    const put = (key: keyof CardFields, value: unknown): void => {
+      body[ids[key]] = value;
+      byFieldId.set(ids[key], key);
+    };
+    if (fields.priority) put('priority', { name: PRIORITY_NAMES[fields.priority] });
+    if (fields.storyPoints !== undefined) put('storyPoints', fields.storyPoints);
+    if (fields.startDate) put('startDate', fields.startDate);
+    if (fields.dueDate) put('dueDate', fields.dueDate);
+    if (byFieldId.size === 0) return [];
+
+    const path = `/issue/${encodeURIComponent(cardId)}`;
+    try {
+      await this.http.put(path, { body: { fields: body } });
+      return [];
+    } catch (e) {
+      // A field that is not on this issue type's screen is a 400 naming it.
+      // Drop those and keep the rest rather than lose the whole estimate.
+      const rejected = e instanceof BoardError && e.status === 400 ? rejectedFields(e.message) : [];
+      const unsupported = rejected.filter((id) => byFieldId.has(id));
+      if (unsupported.length === 0) throw e;
+      for (const id of unsupported) delete body[id];
+      if (Object.keys(body).length) await this.http.put(path, { body: { fields: body } });
+      return unsupported.map((id) => byFieldId.get(id) as keyof CardFields);
+    }
+  }
+
+  async listChildren(cardId: string): Promise<readonly BoardCard[]> {
+    const issues = await this.search(`parent = ${jqlString(cardId)} ORDER BY created ASC`, {
+      limit: 200,
+    });
+    return issues.map((i) => mapIssue(i, this.board.site));
+  }
+
   async whoAmI(): Promise<{ id: string; username: string }> {
     const me = await this.http.get<RawUser>('/myself');
     return { id: me.accountId, username: me.emailAddress ?? me.displayName ?? me.accountId };
@@ -314,4 +417,16 @@ export class JiraSource implements BoardSource {
   private async ensureStatuses(): Promise<void> {
     if (this.statuses.length === 0) await this.loadStatuses();
   }
+}
+
+/** A numeric id or an issue key — Jira accepts either, but in different properties. */
+function issueRef(ref: string): { id: string } | { key: string } {
+  return /^\d+$/.test(ref) ? { id: ref } : { key: ref };
+}
+
+/** Field ids named in a Jira 400 body: `{"errors":{"customfield_10016":"..."}}`. */
+export function rejectedFields(message: string): string[] {
+  const m = /"errors"\s*:\s*\{([^}]*)/.exec(message);
+  if (!m?.[1]) return [];
+  return [...m[1].matchAll(/"([^"]+)"\s*:/g)].map((x) => x[1] as string);
 }

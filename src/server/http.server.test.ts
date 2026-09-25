@@ -6,10 +6,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { BoardStore } from '../board/board.store.js';
 import { loadConfigFromString } from '../config/config.loader.js';
+import { ChatStore } from '../db/chat.store.js';
 import { SqliteStore } from '../db/sqlite.store.js';
 import { newRunId, newTaskId } from '../domain/ids.js';
 
-import { OfficeServer } from './http.server.js';
+import { ChatService, type RunTurn } from './chat.service.js';
+import type { StoryDraft } from './chat.types.js';
+import { OfficeServer, originAllowed } from './http.server.js';
 
 const yaml = `
 version: 1
@@ -18,8 +21,8 @@ projects:
     name: A
     repo: { path: /a, worktreeRoot: /w, githubRepo: x/a }
     board: { provider: trello, boardId: b1, credentials: T, columns: {} }
-    agents: { DEV-BE: { enabled: true } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+    agents: { DEV: { enabled: true } }
+    routes: [{ when: { list: Ready }, agent: DEV }]
 `;
 
 /** Port 0 so the suite never collides with a running daemon. */
@@ -65,7 +68,7 @@ describe('OfficeServer API', () => {
       agents: { key: string }[];
     };
     expect(snap.projects.map((p) => p.id)).toEqual(['pa']);
-    expect(snap.agents.some((a) => a.key === 'pa:DEV-BE')).toBe(true);
+    expect(snap.agents.some((a) => a.key === 'pa:DEV')).toBe(true);
   });
 
   it('returns log lines for a known run, and an empty log for an unknown one', async () => {
@@ -73,7 +76,7 @@ describe('OfficeServer API', () => {
     const task = store.insertTask({
       id: newTaskId(),
       projectId: 'pa',
-      role: 'DEV-BE',
+      role: 'DEV',
       cardId: 'c',
       cardShortId: '1',
       title: 'T',
@@ -86,7 +89,7 @@ describe('OfficeServer API', () => {
       projectId: 'pa',
       workspaceId: null,
       attempt: 1,
-      role: 'DEV-BE',
+      role: 'DEV',
       driver: 'local',
       model: 'opus',
       resumedFrom: null,
@@ -159,7 +162,7 @@ describe('OfficeServer API', () => {
     store.insertTask({
       id: newTaskId(),
       projectId: 'pa',
-      role: 'DEV-BE',
+      role: 'DEV',
       cardId: 'c',
       cardShortId: '7',
       title: 'Queue me',
@@ -180,7 +183,7 @@ describe('OfficeServer API', () => {
     const task = store.insertTask({
       id: newTaskId(),
       projectId: 'pa',
-      role: 'DEV-BE',
+      role: 'DEV',
       cardId: 'c',
       cardShortId: '1',
       title: 'T',
@@ -193,7 +196,7 @@ describe('OfficeServer API', () => {
       projectId: 'pa',
       workspaceId: null,
       attempt: 1,
-      role: 'DEV-BE',
+      role: 'DEV',
       driver: 'local',
       model: 'opus',
       resumedFrom: null,
@@ -252,5 +255,110 @@ describe('OfficeServer static serving', () => {
     const { url } = await start(dist);
     expect((await fetch(`${url}/assets/app-oldhash.js?v=2`)).status).toBe(404);
     expect((await fetch(`${url}/run/x?tab=log`)).status).toBe(200);
+  });
+});
+
+describe('originAllowed', () => {
+  it('lets through no Origin, the same host and loopback dev origins only', () => {
+    expect(originAllowed(undefined, '127.0.0.1:7777')).toBe(true);
+    expect(originAllowed('http://127.0.0.1:7777', '127.0.0.1:7777')).toBe(true);
+    expect(originAllowed('http://localhost:5173', '127.0.0.1:7777')).toBe(true);
+    expect(originAllowed('https://evil.example', '127.0.0.1:7777')).toBe(false);
+    expect(originAllowed('null', '127.0.0.1:7777')).toBe(false);
+  });
+});
+
+describe('OfficeServer chat routes', () => {
+  const draft: StoryDraft = {
+    type: 'story',
+    title: 'Export arrivals as CSV',
+    userStory: 'As an officer, I want a CSV export, so that I can report monthly.',
+    description: '',
+    acceptanceCriteria: ['Given arrivals, when I export, then I get a CSV'],
+    businessDecisions: [],
+    openQuestions: [],
+  };
+  const turn: RunTurn = async (input) => {
+    input.emit({ type: 'text', text: 'Noted.' });
+    input.onDraft(draft);
+    return { sdkSessionId: 's1', costUsd: 0.01, text: 'Noted.', errors: [] };
+  };
+
+  async function chatServer() {
+    const store = new SqliteStore(':memory:');
+    const loaded = loadConfigFromString(yaml, 'x');
+    const submitted: string[] = [];
+    const chat = new ChatService({
+      project: (id) => loaded.project(id),
+      store: new ChatStore(store),
+      runTurn: turn,
+      stories: { submitStory: (_p, key) => submitted.push(key) },
+    });
+    const server = new OfficeServer(loaded, store, new BoardStore(store), {
+      host: '127.0.0.1',
+      port: 0,
+      log: () => {},
+      chat,
+    });
+    const url = await server.start();
+    open.push({ store, server });
+    return { url, submitted };
+  }
+
+  const post = (url: string, body?: unknown, headers: Record<string, string> = {}) =>
+    fetch(url, {
+      method: 'POST',
+      headers: body === undefined ? headers : { 'content-type': 'application/json', ...headers },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  it('starts a session, streams a turn over SSE and submits the draft', async () => {
+    const { url, submitted } = await chatServer();
+
+    const started = await post(`${url}/api/projects/pa/chat`);
+    expect(started.status).toBe(201);
+    const { id } = (await started.json()) as { id: string };
+
+    const res = await post(`${url}/api/chat/${id}/messages`, { text: 'We need an export' });
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    const text = await res.text();
+    expect(text).toContain('event: text');
+    expect(text).toContain('event: draft');
+    expect(text).toContain('event: done');
+
+    const view = (await (await fetch(`${url}/api/chat/${id}`)).json()) as {
+      messages: unknown[];
+      draft: StoryDraft | null;
+    };
+    expect(view.messages).toHaveLength(2);
+    expect(view.draft?.title).toBe(draft.title);
+
+    const sub = await post(`${url}/api/chat/${id}/submit`);
+    expect(sub.status).toBe(200);
+    expect(await sub.json()).toMatchObject({ queued: true, session: { status: 'submitted' } });
+    expect(submitted).toEqual([`chat:${id}`]);
+    expect((await post(`${url}/api/chat/${id}/submit`)).status).toBe(409);
+  });
+
+  it('answers validation failures with a status code, not a stream', async () => {
+    const { url } = await chatServer();
+    expect((await post(`${url}/api/projects/nope/chat`)).status).toBe(404);
+    expect((await fetch(`${url}/api/chat/chat_00`)).status).toBe(404);
+    const { id } = (await (await post(`${url}/api/projects/pa/chat`)).json()) as { id: string };
+    expect((await post(`${url}/api/chat/${id}/messages`, { text: '' })).status).toBe(400);
+    expect((await post(`${url}/api/chat/${id}/submit`)).status).toBe(409); // no draft yet
+  });
+
+  it('refuses cross-origin POSTs', async () => {
+    const { url } = await chatServer();
+    const res = await post(`${url}/api/projects/pa/chat`, undefined, {
+      origin: 'https://evil.example',
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('does not mount the chat when no service is given', async () => {
+    const { url } = await start();
+    expect((await post(`${url}/api/projects/pa/chat`)).status).toBe(404);
   });
 });

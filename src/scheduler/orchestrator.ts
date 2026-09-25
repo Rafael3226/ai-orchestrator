@@ -1,7 +1,10 @@
+import type { WorkItemDraft } from '../board/board.actions.js';
+import { planFinishStep } from '../board/board.actions.js';
 import { createBoardSource, isWebhookRegistrar } from '../board/board.factory.js';
 import type { BoardSource, WebhookRegistrar } from '../board/board.source.js';
 import { BoardStore } from '../board/board.store.js';
 import { BoardSync } from '../board/board.sync.js';
+import type { BoardCard } from '../board/board.types.js';
 import { WebhookBufferedSource } from '../board/board.webhook-buffer.js';
 import { BoardWriter } from '../board/board.writer.js';
 import {
@@ -24,6 +27,7 @@ import type { ProgressReport } from '../mcp/board.schemas.js';
 import type { WebhookServer } from '../server/webhook.server.js';
 import { WorktreeManager } from '../workspace/worktree.manager.js';
 
+import { StaleWatch } from './stale.watch.js';
 import { executeTask, type TaskSink, type Verdict } from './task.runner.js';
 
 export interface OrchestratorLogger {
@@ -49,6 +53,8 @@ interface ProjectRuntime {
 
 const DISPATCH_TICK_MS = 5_000;
 const OUTBOX_TICK_MS = 3_000;
+/** Stale detection is hours-scale; checking every few minutes is plenty and costs one listCards. */
+const STALE_TICK_MS = 5 * 60_000;
 const MIN_START_GAP_MS = 20_000;
 /** Batch a burst of deliveries — a card move is several actions — into one tick. */
 const WAKE_DEBOUNCE_MS = 250;
@@ -69,9 +75,12 @@ export class Orchestrator {
   private readonly runtimes = new Map<string, ProjectRuntime>();
   private dispatchTimer: NodeJS.Timeout | null = null;
   private outboxTimer: NodeJS.Timeout | null = null;
+  private staleTimer: NodeJS.Timeout | null = null;
+  private readonly staleWatch: StaleWatch;
   private lastStartAt = 0;
   private stopping = false;
   private inFlight = new Set<Promise<void>>();
+  private readonly createdListeners = new Set<(idempotencyKey: string, card: BoardCard) => void>();
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -97,11 +106,29 @@ export class Orchestrator {
   ) {
     this.boardStore = new BoardStore(store);
     this.worktrees = new WorktreeManager(store);
+    this.staleWatch = new StaleWatch(store, this.boardStore, this.log);
     this.drivers = new DriverRegistry({ bootId: this.bootId, log: (m) => this.log.info(m) });
   }
 
   get globalRunning(): number {
     return [...this.runtimes.values()].reduce((n, r) => n + r.running, 0);
+  }
+
+  /**
+   * Queue a story confirmed in the BA chat. It goes through the outbox like any
+   * agent-created card, so `flow.newItems` decides who picks it up and the
+   * next outbox tick creates it. Throws for a project that is not running.
+   */
+  submitStory(projectId: string, keyPrefix: string, item: WorkItemDraft): void {
+    const rt = this.runtimes.get(projectId);
+    if (!rt) throw new Error(`project ${projectId} is not running`);
+    rt.writer.enqueueActions(null, '', [{ kind: 'create', item }], keyPrefix);
+  }
+
+  /** Called with the outbox idempotency key whenever a create-card op produced a card. */
+  onCardCreated(fn: (idempotencyKey: string, card: BoardCard) => void): () => void {
+    this.createdListeners.add(fn);
+    return () => this.createdListeners.delete(fn);
   }
 
   async start(): Promise<void> {
@@ -133,6 +160,9 @@ export class Orchestrator {
       const writer = new BoardWriter(project, source, this.boardStore, sync.router, this.log, {
         // One role finishing can wake the next one. See BoardSync.handoff.
         onMoved: (cardId) => void this.handoff(project.id, sync, cardId),
+        onCreated: (row, card) => {
+          for (const fn of this.createdListeners) fn(row.idempotency_key, card);
+        },
       });
       await sync.assertLoopGuard();
       await this.worktrees.gc(project, (m) => this.log.info(m));
@@ -164,6 +194,7 @@ export class Orchestrator {
       this.schedulePoll(rt, jitter(rt.project.id, rt.project.board.poll.intervalSeconds * 1000));
     this.dispatchTimer = setInterval(() => void this.dispatchTick(), DISPATCH_TICK_MS);
     this.outboxTimer = setInterval(() => void this.outboxTick(), OUTBOX_TICK_MS);
+    this.staleTimer = setInterval(() => void this.staleTick(), STALE_TICK_MS);
     this.log.info(
       `orchestrator started: ${this.runtimes.size} project(s), global cap ${this.loaded.config.defaults.concurrency.global}`,
     );
@@ -173,6 +204,7 @@ export class Orchestrator {
     this.stopping = true;
     if (this.dispatchTimer) clearInterval(this.dispatchTimer);
     if (this.outboxTimer) clearInterval(this.outboxTimer);
+    if (this.staleTimer) clearInterval(this.staleTimer);
     for (const rt of this.runtimes.values()) if (rt.pollTimer) clearTimeout(rt.pollTimer);
     await this.stopWebhooks();
     this.log.info(`stopping — waiting for ${this.inFlight.size} run(s)`);
@@ -342,6 +374,19 @@ export class Orchestrator {
     }, delayMs);
   }
 
+  /** Public for tests. */
+  async staleTick(): Promise<void> {
+    for (const rt of this.runtimes.values()) {
+      try {
+        await this.staleWatch.check(rt.project, rt.source, await rt.sync.getTopology());
+      } catch (err) {
+        this.log.error(
+          `${rt.project.id}: stale check failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   private async outboxTick(): Promise<void> {
     for (const rt of this.runtimes.values()) {
       try {
@@ -395,11 +440,20 @@ export class Orchestrator {
       onProgress: (_t: TaskRow, _runId, _p: ProgressReport) => {
         /* surfaced through run_events for the office UI */
       },
-      onFinish: (t, verdict: Verdict, comment) => {
+      onFinish: (t, verdict: Verdict, comment, details) => {
         this.boardStore.saveReport(t.id, verdict, comment);
         const step =
           verdict === 'review' ? 'onSuccess' : verdict === 'blocked' ? 'onBlocked' : 'onFailure';
-        writer.enqueueStep(step, writeback[step], t.id, t.card_id, comment);
+        const actions = details?.actions ?? [];
+        // Agent requests first: a QA sub-task must exist before the move that wakes QA.
+        writer.enqueueActions(t.id, t.card_id, actions);
+        const planned = planFinishStep(writeback[step], {
+          verdict,
+          actions,
+          untestable: details?.untestable ?? false,
+          flow: project.flow,
+        });
+        writer.enqueueStep(step, planned, t.id, t.card_id, comment);
       },
     };
     try {
@@ -410,6 +464,7 @@ export class Orchestrator {
           driver: this.drivers.for(rt.project, roleSchema.parse(task.role)),
           sink,
           log: (m) => this.log.info(m),
+          board: rt.source,
         },
         project,
         task,

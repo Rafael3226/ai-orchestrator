@@ -3,9 +3,11 @@ import { resolve } from 'node:path';
 import { BoardStore } from '../board/board.store.js';
 import { loadConfig } from '../config/config.loader.js';
 import { loadOrchestratorEnv } from '../config/env.js';
+import { ChatStore } from '../db/chat.store.js';
 import { SqliteStore } from '../db/sqlite.store.js';
 import { LocalDriver } from '../exec/local.driver.js';
 import { Orchestrator, type OrchestratorLogger } from '../scheduler/orchestrator.js';
+import { ChatService } from '../server/chat.service.js';
 import { OfficeServer } from '../server/http.server.js';
 import { WebhookServer } from '../server/webhook.server.js';
 
@@ -75,6 +77,14 @@ export async function startDaemon(
       pathSecret: pathSecret ?? 'none',
     },
   );
+  // The BA chat creates stories through the orchestrator's outbox, like any agent.
+  const chat = new ChatService({
+    project: (id) => loaded.project(id),
+    store: new ChatStore(store),
+    log: logger.info,
+  });
+  chat.attachStories(orchestrator);
+  orchestrator.onCardCreated((key, card) => chat.noteCreated(key, card));
   const server = opts.noServer
     ? null
     : new OfficeServer(loaded, store, boardStore, {
@@ -82,6 +92,7 @@ export async function startDaemon(
         port: env.ORCHESTRATOR_PORT,
         webDist: resolve('web/dist'),
         log: logger.info,
+        chat,
       });
 
   await orchestrator.start();
@@ -100,11 +111,18 @@ export async function serveOnly(): Promise<number> {
   const loaded = loadConfig(env.ORCHESTRATOR_CONFIG);
   const store = new SqliteStore(env.ORCHESTRATOR_DB);
   const boardStore = new BoardStore(store);
+  // Chat history is readable here; submitting a story needs the daemon (503 otherwise).
+  const chat = new ChatService({
+    project: (id) => loaded.project(id),
+    store: new ChatStore(store),
+    log: logger.info,
+  });
   const server = new OfficeServer(loaded, store, boardStore, {
     host: env.ORCHESTRATOR_HOST,
     port: env.ORCHESTRATOR_PORT,
     webDist: resolve('web/dist'),
     log: logger.info,
+    chat,
   });
   await server.start();
   return waitForSignal(async () => {

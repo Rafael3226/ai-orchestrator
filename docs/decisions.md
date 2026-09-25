@@ -120,3 +120,38 @@ independent (`board.provider`, `repo.host.provider`). The publisher talks to a
 `PrHost`: `gh` for GitHub, REST for Azure Repos. The Azure Repos PAT reaches git
 only as an env-scoped `http.<url>.extraheader`, never argv, so it cannot leak
 into a process listing or the repo's config.
+
+## One flow table, derived from routes
+
+**v1.0.** The team became BA → PM → DEV → QA, and a card now has to find its
+next owner on success, on failure, when an agent decides it is not theirs, and
+when work is created mid-run. The obvious design — a `flow.stages` map of role
+to column — would have been a second routing table that drifts from `routes`.
+
+Instead a role's _home column_ is derived at load from its first enabled column
+route (plus that route's label). `handTo: <Role>` on a writeback step,
+`flow.escalation`, `flow.newItems`, the agent's `reassign` tool and the bounce
+cap all resolve through it, so a hand-off always lands exactly where the router
+will pick the card up.
+
+_Alternatives rejected._ Letting agents move cards directly would put board
+credentials and ordering into the agent's hands; recording requests and
+applying them through the outbox after the run keeps the crash-safety and loop
+guards the writeback already had, and makes "sub-task before the move that
+wakes QA" a matter of queue order.
+
+## DEV-FE and DEV-BE merge into DEV
+
+**v1.0.** The two were deep-equal in every policy; the split existed for
+routing by label. One DEV role with the project's own workflow command covers
+both, and a project that wants a label-only route still has one.
+
+## The target repo's workflow command is inlined, not executed
+
+**v1.0.** DEV follows `/acts-workflow-managed` from the target repo. Letting the
+CLI run it needs `settingSources: ['project']`, which would also load the repo's
+hooks and `.mcp.json` into an unattended run. The orchestrator reads the command
+(and the commands it references) and inlines it behind fixed overrides: answer
+questions by moving forward, and leave tracker, git-remote and PR steps —
+including self-approve and merge — to the orchestrator. Nothing merges without
+QA and a human.

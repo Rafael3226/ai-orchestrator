@@ -1,8 +1,23 @@
 import { z } from 'zod';
 
-export const ROLES = ['DEV-FE', 'DEV-BE', 'QA', 'PM', 'DEVOPS'] as const;
+import { WORK_ITEM_TYPES } from '../board/board.types.js';
+
+/** In flow order: User → BA → PM → DEV → QA → Closed. DEVOPS sits beside DEV. */
+export const ROLES = ['BA', 'PM', 'DEV', 'QA', 'DEVOPS'] as const;
 export type Role = (typeof ROLES)[number];
 export const roleSchema = z.enum(ROLES);
+
+/** Who a card can be handed to: a role (its home column) or a human (`flow.humanColumn`). */
+export const HAND_TARGETS = [...ROLES, 'human'] as const;
+export type HandTarget = (typeof HAND_TARGETS)[number];
+export const handTargetSchema = z.enum(HAND_TARGETS);
+
+/**
+ * Board tools an agent may be granted. Reading (get_task, list_work_items) and
+ * reporting are always on; these are the ones that change the board.
+ */
+export const CAPABILITIES = ['create-work-item', 'reassign', 'set-fields', 'comment'] as const;
+export type Capability = (typeof CAPABILITIES)[number];
 
 export const BOARD_PROVIDERS = ['trello', 'azure-devops', 'jira'] as const;
 export type BoardProvider = (typeof BOARD_PROVIDERS)[number];
@@ -25,11 +40,21 @@ export const agentSettingsSchema = z.strictObject({
   model: z.string().min(1),
   budget: budgetSchema,
   systemPromptFile: z.string().min(1).optional(),
+  capabilities: z.array(z.enum(CAPABILITIES)),
+  workflowCommand: z.string().min(2).optional(),
 });
+
+/** A slash command in the target repo, e.g. `/acts-workflow-managed` or `/openspec:apply`. */
+const slashCommand = z.string().regex(/^\/[A-Za-z0-9][\w.-]*(:[\w.-]+)*$/, 'like /my-command');
 
 /** What `defaults.agents.<ROLE>` may contain — everything optional. */
 export const writebackStepSchema = z.strictObject({
   move: columnAlias.optional(),
+  /**
+   * Hand the card to a role (its home column, derived from routes) or to a
+   * human (`flow.humanColumn`). An alternative to `move`; set one or the other.
+   */
+  handTo: handTargetSchema.optional(),
   comment: z.enum(['none', 'started', 'report']).default('none'),
   addLabel: labelList.optional(),
   removeLabel: labelList.optional(),
@@ -112,6 +137,13 @@ const agentDefaultsSchema = z.strictObject({
   model: z.string().min(1).optional(),
   budget: budgetSchema.partial().optional(),
   systemPromptFile: z.string().min(1).optional(),
+  /** Replaces the role's default board tools. See `CAPABILITIES`. */
+  capabilities: z.array(z.enum(CAPABILITIES)).optional(),
+  /**
+   * DEV: a slash command in the target repo whose steps the agent follows,
+   * expanded by the orchestrator. `false` turns the builtin default off.
+   */
+  workflowCommand: z.union([slashCommand, z.literal(false)]).optional(),
 });
 
 /**
@@ -261,6 +293,20 @@ const boardBase = {
     .prefault({}),
   /** semantic alias -> board column name (Trello list, ADO state, Jira status) */
   columns: z.record(columnAlias, columnName).default({}),
+  /**
+   * Provider field ids for the planning fields PM sets. Each provider has a
+   * default (see its source); Jira story points in particular vary per site.
+   */
+  fields: z
+    .strictObject({
+      priority: z.string().trim().min(1).optional(),
+      storyPoints: z.string().trim().min(1).optional(),
+      startDate: z.string().trim().min(1).optional(),
+      dueDate: z.string().trim().min(1).optional(),
+    })
+    .prefault({}),
+  /** Work item type -> the provider's type name, e.g. `subtask: Subtask` on team-managed Jira. */
+  cardTypes: z.partialRecord(z.enum(WORK_ITEM_TYPES), z.string().trim().min(1)).default({}),
 } as const;
 
 const trelloBoardSchema = z.strictObject({
@@ -320,6 +366,72 @@ function boardKey(b: BoardInput): string {
   }
 }
 
+/** Who picks up a work item an agent (or the chat) creates. */
+const newItemTarget = z.enum([...HAND_TARGETS, 'none']);
+
+/**
+ * How work moves between roles, how it escalates, and what counts as stuck.
+ * Nothing here names a column directly except through `board.columns`
+ * aliases: a role's *home column* is derived from its routes, so the routes
+ * stay the single source of truth for who works where. See docs/flow.md.
+ */
+export const flowSchema = z.strictObject({
+  /** Where raw requirements land — BA's column. The chat hands to `newItems.story` instead. */
+  intake: columnAlias.optional(),
+  /** The terminal column. Stale detection ignores it. */
+  closed: columnAlias.optional(),
+  /** What `handTo: human` and a tripped bounce cap move the card to. */
+  humanColumn: columnAlias.optional(),
+  /**
+   * Who picks up a created item, by type. Unlisted types stay wherever the
+   * provider creates them (Jira/ADO: the initial state); `subtask` stays on its parent.
+   */
+  newItems: z.partialRecord(z.enum(WORK_ITEM_TYPES), newItemTarget).default({}),
+  /**
+   * Who takes the card when a role fails or blocks. Sugar for
+   * `agents.<ROLE>.writeback.onFailure/onBlocked.handTo`. It replaces the destination
+   * of the project-wide default step; a role's own overlay naming one still wins.
+   */
+  escalation: z
+    .partialRecord(
+      roleSchema,
+      z.strictObject({
+        onFailure: handTargetSchema.optional(),
+        onBlocked: handTargetSchema.optional(),
+      }),
+    )
+    .default({}),
+  /**
+   * How many times one role may be handed the same card (e.g. QA sending it
+   * back to DEV) before it goes to a human with the `ai-loop` label instead.
+   */
+  maxBounces: z.number().int().min(1).max(20).default(3),
+  /** DEV reported the change is not testable: skip QA and move here on success. */
+  untestableTo: columnAlias.optional(),
+  stale: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      /** A card sitting this long in one column, with nothing running, needs attention. */
+      defaultHours: z
+        .number()
+        .positive()
+        .max(24 * 90)
+        .default(48),
+      /** Per column alias. */
+      columns: z
+        .record(
+          columnAlias,
+          z
+            .number()
+            .positive()
+            .max(24 * 90),
+        )
+        .default({}),
+      label: z.string().min(1).default('stale'),
+    })
+    .prefault({}),
+});
+
 export const projectSchema = z.strictObject({
   /** SQLite key, URL segment and office room id. */
   id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,38}$/, 'kebab-case, 2-39 chars'),
@@ -347,6 +459,7 @@ export const projectSchema = z.strictObject({
   agents: z.partialRecord(roleSchema, agentOverrideSchema).default({}),
   routes: z.array(routeSchema).min(1),
   writeback: writebackSchema.prefault({}),
+  flow: flowSchema.prefault({}),
   pr: prSchema.partial().optional(),
 });
 
@@ -418,3 +531,5 @@ export type JiraBoardConfig = Extract<BoardConfig, { provider: 'jira' }>;
 export type RepoHostConfig = z.output<typeof repoHostSchema>;
 export type AgentSettings = z.output<typeof agentSettingsSchema>;
 export type Budget = z.output<typeof budgetSchema>;
+export type FlowConfigRaw = z.output<typeof flowSchema>;
+export type TrelloBoardConfig = Extract<BoardConfig, { provider: 'trello' }>;

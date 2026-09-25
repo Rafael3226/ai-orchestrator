@@ -29,6 +29,11 @@ const ALLOWED_HEADS: ReadonlySet<string> = new Set([
   'prisma',
   'next',
   'vite',
+  'playwright',
+  // .NET projects build and test with the SDK CLI; registry writes are denied below
+  'dotnet',
+  // spec-driven workflows (OpenSpec) some target repos use
+  'openspec',
   // vcs (verbs filtered below)
   'git',
   // read-only file tooling
@@ -126,6 +131,11 @@ const HARD_DENY: readonly { re: RegExp; why: string }[] = [
   },
   { re: /\b(npm|pnpm|yarn)\s+(publish|login|adduser|token|owner)\b/i, why: 'registry write' },
   { re: /\b(npm|pnpm|yarn)\s+config\s+set\b/i, why: 'package manager config write' },
+  {
+    re: /\bdotnet\s+nuget\s+(push|delete|add|update|remove|enable|disable)\b/i,
+    why: 'NuGet registry or source write',
+  },
+  { re: /\bdotnet\s+tool\s+install\s+(-g|--global)\b/i, why: 'global tool install' },
   { re: /\bnode\s+(-e|--eval|-p|--print)\b/i, why: 'inline code bypasses the head allowlist' },
   { re: /\bnpx\s+-y\b/i, why: 'npx -y installs arbitrary packages' },
   {

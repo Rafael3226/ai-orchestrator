@@ -28,8 +28,8 @@ projects:
     repo: { path: ${JSON.stringify(repoPath)}, worktreeRoot: ${JSON.stringify(wt)}, githubRepo: me/demo }
     board: { provider: trello, boardId: b1, credentials: T, columns: {} }
     checks: { ${install ? `install: ${JSON.stringify(install)}` : ''} }
-    agents: { DEV-BE: { enabled: true } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+    agents: { DEV: { enabled: true } }
+    routes: [{ when: { list: Ready }, agent: DEV }]
 `;
 
 const project = (install?: string): ProjectConfig =>
@@ -42,7 +42,7 @@ const acquire = (
   mgr.acquire({
     project: project(),
     taskId,
-    role: 'DEV-BE',
+    role: 'DEV',
     cardShortId: '42',
     cardTitle: 'Add a thing',
     ...over,
@@ -68,7 +68,7 @@ beforeEach(() => {
   taskId = store.insertTask({
     id: newTaskId(),
     projectId: 'demo',
-    role: 'DEV-BE',
+    role: 'DEV',
     cardId: 'c1',
     cardShortId: '42',
     title: 'Add a thing',
@@ -85,7 +85,7 @@ describe('WorktreeManager.acquire', () => {
     expect(ws.path.startsWith(wtRoot)).toBe(true);
     // <card-slug>-<short workspace id>, so a human can tell worktrees apart on disk.
     expect(join(ws.path).slice(wtRoot.length + 1)).toMatch(/^42-[a-z0-9]+$/i);
-    expect(ws.branch).toBe('ai/dev-be/42-add-a-thing');
+    expect(ws.branch).toBe('ai/dev/42-add-a-thing');
     expect(ws.baseBranch).toBe('main');
     expect(ws.baseSha).toBe(git(repo, 'rev-parse', 'origin/main'));
     expect(git(ws.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(ws.branch);
@@ -101,8 +101,8 @@ describe('WorktreeManager.acquire', () => {
     const first = await acquire(mgr);
     const second = await acquire(mgr);
 
-    expect(first.branch).toBe('ai/dev-be/42-add-a-thing');
-    expect(second.branch).toBe('ai/dev-be/42-add-a-thing-2');
+    expect(first.branch).toBe('ai/dev/42-add-a-thing');
+    expect(second.branch).toBe('ai/dev/42-add-a-thing-2');
     expect(second.path).not.toBe(first.path);
   });
 
@@ -123,7 +123,7 @@ describe('WorktreeManager.acquire', () => {
     const reused = await mgr.acquire({
       project: project(),
       taskId,
-      role: 'DEV-BE',
+      role: 'DEV',
       cardShortId: '42',
       cardTitle: 'Add a thing',
       reuseWorkspaceId: first.id,
@@ -138,7 +138,7 @@ describe('WorktreeManager.acquire', () => {
     const fresh = await mgr.acquire({
       project: project(),
       taskId,
-      role: 'DEV-BE',
+      role: 'DEV',
       cardShortId: '42',
       cardTitle: 'Add a thing',
       reuseWorkspaceId: first.id,
@@ -156,7 +156,7 @@ describe('WorktreeManager.acquire', () => {
       mgr.acquire({
         project: loadConfigFromString(yaml(notARepo, wtRoot), 'x').project('demo'),
         taskId,
-        role: 'DEV-BE',
+        role: 'DEV',
         cardShortId: '1',
         cardTitle: 'x',
       }),
@@ -175,7 +175,7 @@ describe('WorktreeManager.acquire', () => {
       mgr.acquire({
         project: project('exit 3'),
         taskId,
-        role: 'DEV-BE',
+        role: 'DEV',
         cardShortId: '42',
         cardTitle: 'Add a thing',
       }),
@@ -184,7 +184,7 @@ describe('WorktreeManager.acquire', () => {
     // No half-built worktree and no orphan branch left behind.
     expect(store.listWorkspaces('demo')).toHaveLength(0);
     expect(git(repo, 'worktree', 'list')).not.toContain(wtRoot.replace(/\\/g, '/'));
-    expect(git(repo, 'branch', '--list', 'ai/dev-be/42-add-a-thing')).toBe('');
+    expect(git(repo, 'branch', '--list', 'ai/dev/42-add-a-thing')).toBe('');
   });
 });
 

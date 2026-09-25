@@ -4,6 +4,8 @@ import type {
   BoardEvent,
   BoardProviderKey,
   BoardTopology,
+  CardFields,
+  NewCard,
 } from './board.types.js';
 
 export interface BoardCapabilities {
@@ -16,6 +18,12 @@ export interface BoardCapabilities {
   readonly labelsAreFreeform: boolean;
   /** The provider can register a push callback; see WebhookRegistrar. */
   readonly canRegisterWebhook: boolean;
+  /** Agents may create stories, bugs and tasks. */
+  readonly canCreateCard: boolean;
+  /** Trello: false — there is no parent/child card, so a sub-task degrades to a comment. */
+  readonly canCreateSubtask: boolean;
+  /** Priority, story points and dates. Trello supports only the dates natively. */
+  readonly canSetFields: boolean;
 }
 
 export interface RegisteredWebhook {
@@ -64,6 +72,15 @@ export interface BoardSource {
   addLabel(cardId: string, labelId: string): Promise<void>;
   removeLabel(cardId: string, labelId: string): Promise<void>;
   assignMember(cardId: string, memberId: string): Promise<void>;
+  /** Create a card. Returns it as the board now sees it. */
+  createCard(card: NewCard): Promise<BoardCard>;
+  /**
+   * Apply planning fields. Returns the names of the fields the provider could
+   * not store, so the caller can say so instead of failing the whole op.
+   */
+  setFields(cardId: string, fields: CardFields): Promise<readonly (keyof CardFields)[]>;
+  /** Direct children (sub-tasks). Empty where the provider has none. */
+  listChildren(cardId: string): Promise<readonly BoardCard[]>;
   /** Trello: the member that owns the token. Used by the loop guard check at boot. */
   whoAmI(): Promise<{ id: string; username: string }>;
 }

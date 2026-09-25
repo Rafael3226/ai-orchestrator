@@ -1,3 +1,5 @@
+import type { AgentBoardAction, WorkItemDraft } from '../board/board.actions.js';
+import type { CardFields } from '../board/board.types.js';
 import type { CostSummary, ExecResult } from '../exec/exec.driver.js';
 import type {
   BlockedReport,
@@ -31,6 +33,46 @@ export interface ReportInput {
   readonly verdictReason: string;
   /** `board-only` inverts the comment: the summary IS the deliverable. */
   readonly outcome?: DeliveryKind;
+  /** Board changes the agent asked for; applied by the outbox after this comment is queued. */
+  readonly actions?: readonly AgentBoardAction[];
+}
+
+const oneLine = (text: string): string => text.replace(/\s*\n+\s*/g, ' ').trim();
+
+/** What the agent asked the board to do, so a human reading the card can see it. */
+export function actionLines(actions: readonly AgentBoardAction[]): string[] {
+  if (!actions.length) return [];
+  return ['## Board changes', ...actions.flatMap(actionLine), ''];
+}
+
+function actionLine(a: AgentBoardAction): string[] {
+  switch (a.kind) {
+    case 'create':
+      return [createdLine(a.item)];
+    case 'reassign':
+      return [`- Handed to **${a.to}**: ${a.reason}`];
+    case 'set-fields':
+      return [`- Planning: ${fieldsSummary(a.fields)}`, `  ${oneLine(a.rationale)}`];
+    case 'comment':
+      return ['- Added a comment'];
+  }
+}
+
+function createdLine(item: WorkItemDraft): string {
+  const to = item.assignTo && item.assignTo !== 'default' ? ` → ${item.assignTo}` : '';
+  const under = item.type === 'subtask' && item.parent ? ' (sub-task of this card)' : '';
+  return `- Created ${item.type}: **${item.title}**${under}${to}`;
+}
+
+function fieldsSummary(f: CardFields): string {
+  return [
+    f.priority ? `priority ${f.priority}` : null,
+    f.storyPoints !== undefined ? `${f.storyPoints} points` : null,
+    f.startDate ? `start ${f.startDate}` : null,
+    f.dueDate ? `due ${f.dueDate}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
 }
 
 const money = (n: number): string => `$${n.toFixed(2)}`;
@@ -138,7 +180,25 @@ export function buildBoardComment(r: ReportInput): string {
       );
     }
     if (r.summary.findings?.length) lines.push(...findingLines(r.summary.findings), '');
+    if (r.summary.testability) {
+      lines.push(
+        r.summary.testability.testable
+          ? `**QA:** testable — ${r.summary.testability.reason}`
+          : `**QA:** not needed — ${r.summary.testability.reason}`,
+        '',
+      );
+    }
   }
+  // Board-only roles have no PR body to carry their decisions, and BA's decisions
+  // are part of the deliverable: they go on the card.
+  if (boardOnly && r.decisions.length) {
+    lines.push(
+      '## Decisions',
+      ...r.decisions.map((d) => `- **${d.title}** — ${oneLine(d.rationale)}`),
+      '',
+    );
+  }
+  lines.push(...actionLines(r.actions ?? []));
   if (r.blocked)
     lines.push(
       `**Blocked (${r.blocked.category}):** ${r.blocked.reason}`,

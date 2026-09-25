@@ -9,7 +9,7 @@ export interface RolePolicy {
 }
 
 const WRITE_TOOLS = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'NotebookEdit', 'TodoWrite', 'Bash'];
-const READ_TOOLS = ['Read', 'Glob', 'Grep', 'TodoWrite', 'Bash'];
+const BOARD_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'TodoWrite'];
 
 /** Never network, never target-repo slash commands, never subagents in M1. */
 const DISALLOWED = ['WebFetch', 'WebSearch', 'SlashCommand', 'Skill', 'Agent', 'Task'];
@@ -21,13 +21,16 @@ const BOARD = 'mcp__board__*';
  * Never bypassPermissions — `allowedTools` does not constrain it. Real
  * confinement lives in the PreToolUse hook (see pretooluse.hook.ts).
  */
+const BOARD_ONLY_POLICY: RolePolicy = {
+  permissionMode: 'dontAsk',
+  allowedTools: [...BOARD_ONLY_TOOLS, BOARD],
+  disallowedTools: [...DISALLOWED, 'Edit', 'Write', 'NotebookEdit', 'Bash'],
+};
+
 export const ROLE_POLICIES: Readonly<Record<Role, RolePolicy>> = {
-  'DEV-BE': {
-    permissionMode: 'dontAsk',
-    allowedTools: [...WRITE_TOOLS, BOARD],
-    disallowedTools: DISALLOWED,
-  },
-  'DEV-FE': {
+  BA: BOARD_ONLY_POLICY,
+  PM: BOARD_ONLY_POLICY,
+  DEV: {
     permissionMode: 'dontAsk',
     allowedTools: [...WRITE_TOOLS, BOARD],
     disallowedTools: DISALLOWED,
@@ -37,15 +40,12 @@ export const ROLE_POLICIES: Readonly<Record<Role, RolePolicy>> = {
     allowedTools: [...WRITE_TOOLS, BOARD],
     disallowedTools: DISALLOWED,
   },
+  // QA writes test suites. Its delivery writeGlobs confine it to test paths;
+  // the PreToolUse guard enforces that, so the tool list does not have to.
   QA: {
     permissionMode: 'dontAsk',
-    allowedTools: [...READ_TOOLS, BOARD],
-    disallowedTools: [...DISALLOWED, 'Edit', 'Write', 'NotebookEdit'],
-  },
-  PM: {
-    permissionMode: 'dontAsk',
-    allowedTools: ['Read', 'Glob', 'Grep', BOARD],
-    disallowedTools: [...DISALLOWED, 'Edit', 'Write', 'NotebookEdit', 'Bash'],
+    allowedTools: [...WRITE_TOOLS, BOARD],
+    disallowedTools: DISALLOWED,
   },
 };
 

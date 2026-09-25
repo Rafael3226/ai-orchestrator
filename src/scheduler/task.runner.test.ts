@@ -46,11 +46,11 @@ projects:
       .filter(Boolean)
       .join(', ')} }
     agents:
-      DEV-BE: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
+      DEV: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
       QA: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
       PM: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
       DEVOPS: { enabled: true, budget: { maxUsd: 1, maxTurns: 5 } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+    routes: [{ when: { list: Ready }, agent: DEV }]
 `;
 
 const project = (test?: string, repoPath = repo): ProjectConfig =>
@@ -75,7 +75,7 @@ class RecordingSink implements TaskSink {
   }
 }
 
-function claimedTask(maxAttempts = 2, role = 'DEV-BE'): TaskRow {
+function claimedTask(maxAttempts = 2, role = 'DEV'): TaskRow {
   const t = store.insertTask({
     id: newTaskId(),
     projectId: 'demo',
@@ -141,9 +141,9 @@ describe('executeTask verdicts', () => {
     expect(sink.progress).toEqual(['writing the thing']);
     expect(sink.finished).toHaveLength(1);
     expect(sink.finished[0]!.verdict).toBe('review');
-    expect(sink.finished[0]!.comment).toContain('✅ **DEV-BE** — review (attempt 1)');
+    expect(sink.finished[0]!.comment).toContain('✅ **DEV** — review (attempt 1)');
     expect(sink.finished[0]!.comment).toContain('Adds the thing, with a test');
-    expect(sink.finished[0]!.comment).toContain('ai/dev-be/42-add-a-thing');
+    expect(sink.finished[0]!.comment).toContain('ai/dev/42-add-a-thing');
 
     const run = store.listRunsForTask(task.id)[0]!;
     expect(run.outcome).toBe('success');
@@ -308,7 +308,7 @@ describe('executeTask verdicts', () => {
 
     const spec = driver.specs[0]!;
     expect(spec.prompt).toContain('Please add the thing.');
-    expect(spec.systemPromptAppend).toContain('You are DEV-BE');
+    expect(spec.systemPromptAppend).toContain('You are DEV');
     expect(spec.cwd.startsWith(wtRoot)).toBe(true);
     expect(spec.maxTurns).toBe(5);
     expect(spec.maxBudgetUsd).toBe(1);
@@ -462,7 +462,7 @@ describe('delivery policy: roles that do not end in a pull request', () => {
   it('still fails a DEV role that produces no diff', async () => {
     // The `optional` escape hatch must not leak to roles that must produce code.
     const driver = new ScriptedDriver([{ calls: [['propose_summary', aSummary()]] }]);
-    const task = claimedTask(1, 'DEV-BE');
+    const task = claimedTask(1, 'DEV');
 
     const r = await executeTask(deps(driver, new RecordingSink()), project(), task, {
       keepWorkspace: true,
@@ -481,7 +481,7 @@ describe('delivery policy: roles that do not end in a pull request', () => {
         calls: [['propose_summary', noCommit]],
       },
     ]);
-    const task = claimedTask(1, 'DEV-BE');
+    const task = claimedTask(1, 'DEV');
 
     const r = await executeTask(deps(driver, new RecordingSink()), project(), task, {
       keepWorkspace: true,
@@ -501,7 +501,7 @@ describe('container driver path mapping', () => {
       kind: 'docker',
       paths: { mode: 'posix', toAgent: () => '/work' },
     });
-    const task = claimedTask(1, 'DEV-BE');
+    const task = claimedTask(1, 'DEV');
 
     await executeTask(deps(driver, new RecordingSink()), project(), task, {
       dryRun: true,
@@ -523,7 +523,7 @@ describe('container driver path mapping', () => {
 
   it('keeps host paths for the local driver', async () => {
     const driver = new ScriptedDriver([{ calls: [['propose_summary', aSummary()]] }]);
-    const task = claimedTask(1, 'DEV-BE');
+    const task = claimedTask(1, 'DEV');
 
     await executeTask(deps(driver, new RecordingSink()), project(), task, {
       dryRun: true,

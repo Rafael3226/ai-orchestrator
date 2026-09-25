@@ -12,6 +12,11 @@
       <span id="conn" class="pill">connecting…</span>
       <span id="stats" class="muted"></span>
       <span id="diag" class="muted warn"></span>
+      <span class="spacer"></span>
+      <button id="attention-toggle" class="hbtn" type="button" title="Nothing needs attention">
+        ⚑ 0
+      </button>
+      <button id="chat-toggle" class="hbtn" type="button">💬 New story</button>
     </header>
     <main>
       <canvas id="office"></canvas>
@@ -22,6 +27,34 @@
         </div>
         <div id="drawer-meta" class="muted"></div>
         <pre id="drawer-log"></pre>
+      </aside>
+      <aside id="attention" class="panel" hidden>
+        <div class="drawer-head">
+          <span>Needs attention</span>
+          <button id="attention-close" aria-label="close">✕</button>
+        </div>
+        <div id="attention-list"></div>
+      </aside>
+      <aside id="chat" class="panel" hidden aria-label="Chat with BA">
+        <div class="drawer-head">
+          <span>Talk to BA</span>
+          <select id="chat-project" aria-label="project"></select>
+          <button id="chat-new" type="button" title="start a new conversation">new</button>
+          <button id="chat-close" aria-label="close">✕</button>
+        </div>
+        <div id="chat-log" aria-live="polite"></div>
+        <div id="chat-draft" hidden></div>
+        <form id="chat-form">
+          <textarea
+            id="chat-input"
+            rows="3"
+            placeholder="What do you need? (Enter to send, Shift+Enter for a new line)"
+          ></textarea>
+          <div class="chat-row">
+            <span id="chat-meta" class="muted"></span>
+            <button id="chat-send" type="submit">Send</button>
+          </div>
+        </form>
       </aside>
     </main>
     <footer id="bottom" class="muted">

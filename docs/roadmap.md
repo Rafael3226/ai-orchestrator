@@ -1,14 +1,15 @@
 # Roadmap
 
-| Phase | Deliverable                                                                 | Status |
-| ----- | --------------------------------------------------------------------------- | ------ |
-| 0     | Unblock git (stray `D:\Repos\.git` moved to backup), init this repo         | done   |
-| 1     | Scaffold: tooling, env + YAML config schema, CLI skeleton, `doctor`         | done   |
-| 2     | Execution spine: worktrees, `LocalDriver`, policy hooks, pipeline, SQLite   | done   |
-| 3     | Board integration: fake source, Trello client + poller, router, outbox, MCP | done   |
-| 4     | Office UI: Fastify + SSE + Vite canvas                                      | done   |
-| 5     | Breadth: remaining roles, Docker driver, webhooks                           | built  |
-| 6     | ADO / Jira boards, Azure Repos PRs (polling; see `docs/providers.md`)       | built  |
+| Phase | Deliverable                                                                          | Status |
+| ----- | ------------------------------------------------------------------------------------ | ------ |
+| 0     | Unblock git (stray `D:\Repos\.git` moved to backup), init this repo                  | done   |
+| 1     | Scaffold: tooling, env + YAML config schema, CLI skeleton, `doctor`                  | done   |
+| 2     | Execution spine: worktrees, `LocalDriver`, policy hooks, pipeline, SQLite            | done   |
+| 3     | Board integration: fake source, Trello client + poller, router, outbox, MCP          | done   |
+| 4     | Office UI: Fastify + SSE + Vite canvas                                               | done   |
+| 5     | Breadth: remaining roles, Docker driver, webhooks                                    | built  |
+| 6     | ADO / Jira boards, Azure Repos PRs (polling; see `docs/providers.md`)                | built  |
+| 7     | v1.0 team: BA/PM/DEV/QA flow, board tools, chat intake, stale watch (`docs/flow.md`) | built  |
 
 **Milestone 1 — a real card to a real draft PR — is met.** Two `be` cards on the
 live board dispatched DEV-BE, verified, pushed and opened draft PRs without a

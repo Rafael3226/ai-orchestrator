@@ -7,11 +7,21 @@ defaults:
     global: 3
     perProject: 1
   agents:
-    DEV-BE: { model: opus, budget: { maxUsd: 6.00, maxTurns: 120, wallClockMinutes: 30 } }
-    DEV-FE: { model: opus, budget: { maxUsd: 6.00, maxTurns: 120, wallClockMinutes: 30 } }
-    QA: { model: sonnet, budget: { maxUsd: 1.50, maxTurns: 60, wallClockMinutes: 20 } }
-    PM: { model: haiku, budget: { maxUsd: 0.50, maxTurns: 20, wallClockMinutes: 10 } }
+    # The flow is User → BA → PM → DEV → QA → Closed; DEVOPS sits beside DEV.
+    BA: { model: sonnet, budget: { maxUsd: 1.50, maxTurns: 40, wallClockMinutes: 15 } }
+    PM: { model: sonnet, budget: { maxUsd: 1.00, maxTurns: 30, wallClockMinutes: 10 } }
+    DEV:
+      model: opus
+      budget: { maxUsd: 8.00, maxTurns: 150, wallClockMinutes: 45 }
+      # A slash command in the TARGET repo whose steps DEV follows. The
+      # orchestrator inlines it and keeps git/board/PR steps for itself.
+      # `false` turns it off. Missing in a repo → the standard workflow.
+      workflowCommand: /acts-workflow-managed
+    QA: { model: sonnet, budget: { maxUsd: 3.00, maxTurns: 100, wallClockMinutes: 30 } }
     DEVOPS: { model: sonnet, budget: { maxUsd: 2.00, maxTurns: 60, wallClockMinutes: 20 } }
+    # Board tools per role (default: create-work-item, reassign, comment;
+    # PM adds set-fields). Uncomment to narrow one:
+    # QA: { capabilities: [create-work-item, reassign] }
   pr:
     draft: true
     labels: [ai-generated]
@@ -68,55 +78,77 @@ projects:
         # new registrations.
         deleteOnShutdown: false
       columns:
-        backlog: Backlog
+        requirements: Requirements
+        refinement: Refinement
         ready: Ready for Dev
         inProgress: In Progress
-        review: In Review
+        testing: Testing
         blocked: Blocked
         done: Done
+      # Planning-field ids, when the provider default does not fit (Jira story
+      # points vary per site). Trello stores only the dates natively.
+      # fields: { storyPoints: customfield_10016, startDate: customfield_10015 }
+      # cardTypes: { subtask: Subtask }   # team-managed Jira
     # Per project (and per role, via agents.<ROLE>.docker) this overlays
     # defaults.exec — only the keys you name.
     # exec: { driver: docker, docker: { memoryMb: 8192 } }
+    # Each role hands the card to the next with `handTo`: the target role's
+    # home column is derived from its routes below, so there is one table.
+    # See docs/flow.md.
     agents:
-      DEV-BE: { enabled: true }
-      DEV-FE: { enabled: true }
-      DEVOPS: { enabled: false }
+      BA:
+        enabled: true
+        writeback: { onSuccess: { handTo: PM, comment: report } }
       PM:
-        enabled: false
-        # PM produces a spec, not code: its success sends the card onward to
-        # Ready for Dev rather than to review.
-        writeback:
-          onSuccess:
-            move: ready
-            comment: report
-            addLabel: spec-ready
-            removeLabel: needs-spec
+        enabled: true
+        writeback: { onSuccess: { handTo: DEV, comment: report } }
+      DEV:
+        enabled: true
+        # A change DEV marks "not testable" skips QA (flow.untestableTo).
+        writeback: { onSuccess: { handTo: QA, comment: report } }
       QA:
-        enabled: false
-        # QA is routed on In Review, so its own writeback must NOT move the card
-        # back there — the loader rejects that as a dispatch loop.
-        writeback:
-          onSuccess: { move: done, comment: report, addLabel: qa-passed }
-          onFailure: { move: ready, comment: report, addLabel: qa-findings }
-    # First match wins after the priority sort, so the column-only QA route is
-    # listed last — otherwise it would shadow the label routes above it.
+        enabled: true
+        # QA's findings send the card back to DEV (flow.escalation below).
+        writeback: { onSuccess: { move: done, comment: report, addLabel: qa-passed } }
+      DEVOPS: { enabled: false }
+    # First match wins after the priority sort, so a label route goes above the
+    # column-only route for the same column — otherwise it would be shadowed.
     routes:
-      - when: { list: Backlog, label: needs-spec }
+      - when: { list: Requirements }
+        agent: BA
+      - when: { list: Refinement }
         agent: PM
-      - when: { list: Ready for Dev, label: be }
-        agent: DEV-BE
-      - when: { list: Ready for Dev, label: fe }
-        agent: DEV-FE
       - when: { list: Ready for Dev, label: infra }
         agent: DEVOPS
-      - when: { list: In Review }
+      - when: { list: Ready for Dev }
+        agent: DEV
+      - when: { list: Testing }
         agent: QA
     # The project default; each role may overlay individual steps above.
     writeback:
       onStart: { move: inProgress, assign: bot, comment: started }
-      onSuccess: { move: review, comment: report }
+      onSuccess: { move: done, comment: report }
       onFailure: { move: blocked, comment: report, addLabel: ai-failed }
       onBlocked: { move: blocked, comment: report, addLabel: needs-human }
+    flow:
+      intake: requirements # raw requirements; the office chat hands stories to PM directly
+      closed: done
+      humanColumn: blocked
+      # Who picks up what an agent (or the chat) creates.
+      newItems: { story: PM, bug: DEV, task: DEV }
+      # Who takes the card when a role fails or blocks. An explicit writeback
+      # move/handTo on that step wins over this.
+      escalation:
+        BA: { onBlocked: human }
+        PM: { onBlocked: BA }
+        DEV: { onFailure: human, onBlocked: PM }
+        QA: { onFailure: DEV }
+      maxBounces: 3 # the 4th hand-off of one card to the same role goes to a human, labelled ai-loop
+      untestableTo: done
+      stale:
+        defaultHours: 48
+        columns: { blocked: 24, testing: 24 }
+        label: stale
 
   # ── Azure DevOps: work items on the board, pull requests in Azure Repos ──
   # A card is a work item; its column is the work item State. `whoami
@@ -148,10 +180,10 @@ projects:
   #       inProgress: Active
   #       review: Resolved
   #       blocked: Blocked # a custom state; the Agile template has none
-  #   agents: { DEV-BE: { enabled: true } }
+  #   agents: { DEV: { enabled: true } }
   #   routes:
   #     - when: { column: Ready, label: be }
-  #       agent: DEV-BE
+  #       agent: DEV
   #   writeback:
   #     onStart: { move: inProgress, assign: bot, comment: started }
   #     onSuccess: { move: review, comment: report }
@@ -180,10 +212,10 @@ projects:
   #       inProgress: In Progress
   #       review: In Review
   #       blocked: Blocked
-  #   agents: { DEV-BE: { enabled: true } }
+  #   agents: { DEV: { enabled: true } }
   #   routes:
   #     - when: { column: Selected for Development }
-  #       agent: DEV-BE
+  #       agent: DEV
   #   writeback:
   #     onStart: { move: inProgress, assign: bot, comment: started }
   #     onSuccess: { move: review, comment: report }

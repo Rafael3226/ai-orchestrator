@@ -190,7 +190,7 @@ program
   .command('run-task')
   .description('Run one task end to end with no board: worktree → agent → verify → draft PR')
   .requiredOption('-p, --project <id>', 'project id from orchestrator.yaml')
-  .option('-r, --role <role>', `agent role (${ROLES.join('|')})`, 'DEV-BE')
+  .option('-r, --role <role>', `agent role (${ROLES.join('|')})`, 'DEV')
   .requiredOption('-t, --title <title>', 'work item title')
   .option('-s, --spec <text>', 'work item description (the spec)')
   .option('-f, --spec-file <path>', 'read the spec from a file')

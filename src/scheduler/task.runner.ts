@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { AgentBoardAction, WorkItemDraft } from '../board/board.actions.js';
+import type { BoardCard, CardFields } from '../board/board.types.js';
 import type { ProjectConfig } from '../config/config.loader.js';
 import { type Role, roleSchema } from '../config/config.schema.js';
 import type { SqliteStore, TaskRow } from '../db/sqlite.store.js';
@@ -29,15 +31,29 @@ import { AGENT_ENV, ROLE_POLICIES } from '../policy/tool.policy.js';
 import { runCommand } from '../process/command.runner.js';
 import { buildSystemAppend } from '../prompt/system.append.js';
 import { buildUserPrompt } from '../prompt/user.prompt.js';
+import { expandWorkflowCommand, renderWorkflowSection } from '../prompt/workflow.command.js';
 import type { WorkspaceHandle, WorktreeManager } from '../workspace/worktree.manager.js';
 
 export type Verdict = 'review' | 'blocked' | 'needs_human' | 'failed';
+
+/** What else a finished run hands the board, beyond the verdict and report. */
+export interface FinishDetails {
+  /** Board changes the agent requested, in order. */
+  readonly actions: readonly AgentBoardAction[];
+  /** DEV reported nothing for QA to test. */
+  readonly untestable: boolean;
+}
 
 /** How a task's lifecycle reaches the board (or the console). */
 export interface TaskSink {
   onStart(task: TaskRow, comment: string): void;
   onProgress(task: TaskRow, runId: RunId, p: ProgressReport): void;
-  onFinish(task: TaskRow, verdict: Verdict, comment: string): void;
+  onFinish(task: TaskRow, verdict: Verdict, comment: string, details?: FinishDetails): void;
+}
+
+/** Live board reads a run may need. Writes never happen mid-run — see AgentBoardAction. */
+export interface BoardReader {
+  listChildren(cardId: string): Promise<readonly BoardCard[]>;
 }
 
 export interface TaskRunnerDeps {
@@ -46,6 +62,8 @@ export interface TaskRunnerDeps {
   readonly driver: ExecDriver;
   readonly sink: TaskSink;
   readonly log: (msg: string) => void;
+  /** Absent in the CLI's one-shot runs; list_work_items then reports it is unavailable. */
+  readonly board?: BoardReader;
 }
 
 export interface ExecuteOptions {
@@ -139,6 +157,9 @@ export async function executeTask(
   let diff: ReportInput['diff'] = null;
   let hooksBypassed = false;
   let lastRunId: RunId | null = null;
+  // Shared across attempts: a retry resumes the same session, so a sub-task
+  // requested on attempt 1 still counts on attempt 2.
+  const actions: AgentBoardAction[] = [];
 
   try {
     while (attempt < task.max_attempts) {
@@ -178,6 +199,9 @@ export async function executeTask(
         sessionId,
         executor: executorFor(workspace.path, workspace.id),
         onProgress: (p) => sink.onProgress(store.getTask(taskId), runId, p),
+        actions,
+        cardId: task.card_id,
+        ...(deps.board ? { board: deps.board } : {}),
         taskView: {
           projectId: project.id,
           role,
@@ -189,6 +213,7 @@ export async function executeTask(
           attempt,
           maxAttempts: task.max_attempts,
           branch: workspace.branch,
+          today: new Date().toISOString().slice(0, 10),
         },
         previousFailure:
           prev && !prev.ok
@@ -332,9 +357,14 @@ export async function executeTask(
     verdict,
     verdictReason: reason,
     outcome: delivery.kind,
+    actions,
   };
   const comment = buildBoardComment(report);
-  sink.onFinish(store.getTask(taskId), verdict, comment);
+  sink.onFinish(store.getTask(taskId), verdict, comment, {
+    // Dry run only skips git publishing; board writeback — and so these — still happen.
+    actions,
+    untestable: outcome?.summary?.testability?.testable === false,
+  });
 
   if (verdict === 'review' && !opts.keepWorkspace && !opts.dryRun) {
     await worktrees.release(project, workspace.id, log);
@@ -369,6 +399,57 @@ interface RunAgentInput {
   executor: WorkspaceExecutor;
   onProgress: (p: ProgressReport) => void;
   log: (m: string) => void;
+  /** Shared with executeTask across attempts; the board tools append to it. */
+  actions: AgentBoardAction[];
+  cardId: string;
+  board?: BoardReader;
+}
+
+/**
+ * Checked when the agent asks, so a bad request round-trips as a tool error
+ * it can fix — not as a dead outbox row an hour later.
+ */
+export function validateAction(project: ProjectConfig, role: Role, a: AgentBoardAction): string[] {
+  switch (a.kind) {
+    case 'reassign':
+      return a.to === role
+        ? ['you cannot reassign the card to yourself']
+        : errorList(targetError(project, a.to));
+    case 'create':
+      return createErrors(project, a.item);
+    case 'set-fields':
+      return fieldErrors(a.fields);
+    case 'comment':
+      return [];
+  }
+}
+
+const errorList = (err: string | null): string[] => (err ? [err] : []);
+
+/** Whether a card can be handed to `to` in this project. */
+function targetError(project: ProjectConfig, to: string): string | null {
+  if (to === 'human') {
+    return project.flow.humanColumn ? null : 'this project has no human column (flow.humanColumn)';
+  }
+  const r = roleSchema.safeParse(to);
+  if (!r.success) return `unknown role ${to}`;
+  if (!project.agents[r.data].enabled) return `${to} is not enabled in this project`;
+  return project.flow.homes[r.data] ? null : `${to} has no column on this board`;
+}
+
+function createErrors(project: ProjectConfig, item: WorkItemDraft): string[] {
+  const errors: string[] = [];
+  if (item.type === 'subtask' && !item.parent) {
+    errors.push('a subtask needs parent: "current" (or a parent card key)');
+  }
+  const to = item.assignTo;
+  if (to && to !== 'none' && to !== 'default') errors.push(...errorList(targetError(project, to)));
+  return errors;
+}
+
+function fieldErrors(f: CardFields): string[] {
+  if (!Object.keys(f).length) return ['set at least one field'];
+  return f.startDate && f.dueDate && f.dueDate < f.startDate ? ['dueDate is before startDate'] : [];
 }
 
 async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
@@ -398,6 +479,27 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
       decisions.push(d);
       store.updateRun(runId, { decisions_json: JSON.stringify(decisions) });
     },
+    capabilities: agent.capabilities,
+    recordAction: (a) => {
+      const errors = validateAction(project, role, a);
+      if (!errors.length) {
+        input.actions.push(a);
+        store.appendEvent(runId, taskId, 'board-action', a);
+        log(`  ⚑ ${a.kind}${a.kind === 'create' ? ` ${a.item.type}: ${a.item.title}` : ''}`);
+      }
+      return errors;
+    },
+    ...(input.board
+      ? {
+          listChildren: async () =>
+            (await input.board!.listChildren(input.cardId)).map((c) => ({
+              shortId: c.shortId,
+              title: c.title,
+              description: c.description,
+              url: c.url,
+            })),
+        }
+      : {}),
     storeSummary: async (s) => {
       // Whether a commit is required is a property of the role, not the schema:
       // a board-only role has nothing to commit and must not be made to invent
@@ -408,6 +510,7 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
           : s.commit
             ? await validateCommitWithRepo(workspace.path, s, input.executor)
             : [];
+      errors.push(...roleSummaryErrors(role, s, input.actions));
       if (!errors.length) {
         summary = s;
         store.updateRun(runId, { summary_json: JSON.stringify(s) });
@@ -451,6 +554,8 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
             ? (project.checks.infra ?? project.checks.test ?? null)
             : (project.checks.test ?? null),
       ...(input.previousFailure ? { previousFailure: input.previousFailure } : {}),
+      ...workflowFor(input),
+      ...(role === 'PM' ? { inFlight: inFlight(store, project.id, input.cardId) } : {}),
     }),
     model: agent.model,
     allowedTools: policy.allowedTools,
@@ -512,6 +617,60 @@ async function runAgent(input: RunAgentInput): Promise<AgentOutcome> {
     .run(runId, input.attempt, taskId);
 
   return { exec, summary, blocked, decisions, denials };
+}
+
+/**
+ * What a role's summary must carry beyond the schema. DEV owes QA a decision,
+ * and a "testable" decision owes QA the how-to-test sub-task — checked here so
+ * the gap is fixed in the run, not discovered by an idle QA.
+ */
+export function roleSummaryErrors(
+  role: Role,
+  s: ProposedSummary,
+  actions: readonly AgentBoardAction[],
+): string[] {
+  if (role !== 'DEV') return [];
+  if (!s.testability) {
+    return ['DEV must set `testability` — is there anything for QA to verify, and why?'];
+  }
+  const qaSubtask = actions.some((a) => a.kind === 'create' && a.item.type === 'subtask');
+  if (s.testability.testable && !qaSubtask) {
+    return [
+      'testable is true but no QA sub-task was created — call create_work_item with type ' +
+        '"subtask", parent "current", describing how to test the change',
+    ];
+  }
+  return [];
+}
+
+/** The role's workflow command, expanded, when it has one and the repo defines it. */
+function workflowFor(input: RunAgentInput): { workflow?: string } {
+  const command = input.project.agents[input.role].workflowCommand;
+  if (!command) return {};
+  // The main checkout first: `.claude/` is often gitignored, so a fresh
+  // worktree does not have it. Read-only, and inlined — nothing here executes.
+  const roots = [input.project.repo.path, input.workspace.path];
+  const args = input.taskView.cardShortId;
+  const expanded = expandWorkflowCommand(roots, command, args);
+  if (!expanded) {
+    input.log(`  workflow ${command} not found in the repo — using the standard workflow`);
+    return {};
+  }
+  input.log(
+    `  workflow ${expanded.name} ${args}` +
+      (expanded.nested.length ? ` (+ ${expanded.nested.map((n) => n.name).join(', ')})` : ''),
+  );
+  return { workflow: renderWorkflowSection(expanded, args) };
+}
+
+/** PM schedules against what the team already has on its plate. */
+function inFlight(store: SqliteStore, projectId: string, exceptCardId: string): string[] {
+  const live = ['queued', 'claimed', 'preparing', 'running', 'verifying', 'publishing'];
+  return store
+    .listTasks({ projectId })
+    .filter((t) => live.includes(t.state) && t.card_id !== exceptCardId)
+    .slice(0, 30)
+    .map((t) => `[${t.card_short_id}] ${t.title} — ${t.role}, ${t.state}`);
 }
 
 /**

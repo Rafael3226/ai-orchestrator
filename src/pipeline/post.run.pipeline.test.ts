@@ -29,8 +29,8 @@ projects:
     name: Demo
     repo: { path: ${JSON.stringify(repoPath)}, worktreeRoot: /wt, githubRepo: me/demo }
     board: { provider: trello, boardId: b1, credentials: T, columns: {} }
-    agents: { DEV-BE: { enabled: true }, QA: { enabled: true } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+    agents: { DEV: { enabled: true }, QA: { enabled: true } }
+    routes: [{ when: { list: Ready }, agent: DEV }]
 `;
 
 const summary = (over: Partial<ProposedSummary> = {}): ProposedSummary =>
@@ -79,7 +79,7 @@ const run = (delivery: DeliveryPolicy, pr = fakePr()) =>
       runId: 'run-1',
       cardShortId: '42',
       cardUrl: 'https://fake/c/42',
-      role: 'DEV-BE',
+      role: 'DEV',
       attempt: 1,
       summary: summary(),
       decisions: [],
@@ -123,8 +123,8 @@ beforeEach(() => {
 
 describe('publish', () => {
   it('aborts on an empty diff when the role must produce one', async () => {
-    await expect(run(ROLE_DELIVERY['DEV-BE'])).rejects.toBeInstanceOf(PublishAbort);
-    await expect(run(ROLE_DELIVERY['DEV-BE'])).rejects.toMatchObject({
+    await expect(run(ROLE_DELIVERY['DEV'])).rejects.toBeInstanceOf(PublishAbort);
+    await expect(run(ROLE_DELIVERY['DEV'])).rejects.toMatchObject({
       code: 'nothing-to-commit',
     });
   }, 30_000);
@@ -164,7 +164,7 @@ describe('publish', () => {
     writeFileSync(join(repo, 'thing.ts'), 'export const t = 1;\n');
     const pr = fakePr();
 
-    const out = await run(ROLE_DELIVERY['DEV-BE'], pr);
+    const out = await run(ROLE_DELIVERY['DEV'], pr);
 
     expect(out.kind).toBe('pull-request');
     expect(out.sha).toMatch(/^[0-9a-f]{7,}$/);

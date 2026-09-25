@@ -129,5 +129,7 @@ export const aSummary = (over: Record<string, unknown> = {}) => ({
   testPlan: 'pnpm test in the package',
   filesTouched: ['thing.ts'],
   commit: { type: 'feat', subject: 'add the thing' },
+  // DEV must say whether QA has anything to test; other roles ignore it.
+  testability: { testable: false, reason: 'an internal helper with no observable behaviour' },
   ...over,
 });

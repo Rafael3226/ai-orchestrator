@@ -75,7 +75,15 @@ CREATE TABLE IF NOT EXISTS task_reports (
 );
 `;
 
-export type OutboxOp = 'move' | 'comment' | 'add-label' | 'remove-label' | 'assign';
+export type OutboxOp =
+  | 'move'
+  | 'comment'
+  | 'add-label'
+  | 'remove-label'
+  | 'assign'
+  | 'hand-to'
+  | 'create-card'
+  | 'set-fields';
 
 export type DeliveryCounter = 'delivered' | 'rejected' | 'dropped';
 

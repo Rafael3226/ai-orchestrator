@@ -15,11 +15,11 @@ describe('renderBranchName', () => {
     expect(
       renderBranchName({
         template: 'ai/{role}/{cardShortId}-{slug}',
-        role: 'DEV-BE',
+        role: 'DEV',
         cardShortId: '142',
         cardTitle: 'Add pagination',
       }),
-    ).toBe('ai/dev-be/142-add-pagination');
+    ).toBe('ai/dev/142-add-pagination');
   });
 });
 

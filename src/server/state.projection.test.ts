@@ -15,8 +15,8 @@ projects:
     name: A
     repo: { path: /a, worktreeRoot: /w, githubRepo: x/a }
     board: { provider: trello, boardId: b1, credentials: T, columns: {} }
-    agents: { DEV-BE: { enabled: true } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+    agents: { DEV: { enabled: true } }
+    routes: [{ when: { list: Ready }, agent: DEV }]
   - id: pb
     name: B
     repo: { path: /b, worktreeRoot: /w, githubRepo: x/b }
@@ -34,7 +34,7 @@ describe('StateProjector', () => {
       [640, 0],
     ]);
     expect(s.agents).toHaveLength(10);
-    const devBe = s.agents.find((a) => a.key === 'pa:DEV-BE')!;
+    const devBe = s.agents.find((a) => a.key === 'pa:DEV')!;
     expect(devBe.status).toBe('idle');
     expect(s.agents.find((a) => a.key === 'pa:QA')!.status).toBe('offline');
   });
@@ -42,8 +42,8 @@ describe('StateProjector', () => {
   it('seats all five roles at distinct desks once they are enabled', () => {
     // Enabling four more roles is config only — the canvas needs no code.
     const allFive = yaml.replace(
-      'agents: { DEV-BE: { enabled: true } }',
-      'agents: { DEV-BE: { enabled: true }, DEV-FE: { enabled: true }, QA: { enabled: true }, PM: { enabled: true }, DEVOPS: { enabled: true } }',
+      'agents: { DEV: { enabled: true } }',
+      'agents: { DEV: { enabled: true }, BA: { enabled: true }, QA: { enabled: true }, PM: { enabled: true }, DEVOPS: { enabled: true } }',
     );
     const store = new SqliteStore(':memory:');
     const p = new StateProjector(loadConfigFromString(allFive, 'x'), store, new BoardStore(store));
@@ -63,7 +63,7 @@ describe('StateProjector', () => {
     const t = store.insertTask({
       id: newTaskId(),
       projectId: 'pa',
-      role: 'DEV-BE',
+      role: 'DEV',
       cardId: 'c',
       cardShortId: '1',
       title: 'T',
@@ -71,7 +71,7 @@ describe('StateProjector', () => {
     });
     store.transitionTask(t.id, 'queued', 'claimed');
     store.transitionTask(t.id, 'claimed', 'preparing');
-    expect(p.snapshot(1).agents.find((a) => a.key === 'pa:DEV-BE')!.status).toBe('preparing');
+    expect(p.snapshot(1).agents.find((a) => a.key === 'pa:DEV')!.status).toBe('preparing');
 
     store.transitionTask(t.id, 'preparing', 'running');
     const runId = newRunId();
@@ -81,32 +81,32 @@ describe('StateProjector', () => {
       projectId: 'pa',
       workspaceId: null,
       attempt: 1,
-      role: 'DEV-BE',
+      role: 'DEV',
       driver: 'local',
       model: 'opus',
     });
     store.updateRun(runId, { state: 'running', num_turns: 3, cost_usd: 0.5 });
     store.db.prepare('UPDATE tasks SET current_run_id = ? WHERE id = ?').run(runId, t.id);
-    expect(p.snapshot(2).agents.find((a) => a.key === 'pa:DEV-BE')!.status).toBe('thinking');
+    expect(p.snapshot(2).agents.find((a) => a.key === 'pa:DEV')!.status).toBe('thinking');
 
     store.appendEvent(runId, t.id, 'progress', { phase: 'implementing', message: 'working' });
     store.appendEvent(runId, t.id, 'tool-use', { name: 'Edit', inputPreview: '{}' });
-    const a = p.snapshot(3).agents.find((x) => x.key === 'pa:DEV-BE')!;
+    const a = p.snapshot(3).agents.find((x) => x.key === 'pa:DEV')!;
     expect(a.status).toBe('typing');
     expect(a.run).toMatchObject({
       cardShortId: '1',
       turns: 3,
       costUsd: 0.5,
-      budgetUsd: 6,
+      budgetUsd: 8,
       phase: 'implementing',
       lastToolName: 'Edit',
     });
 
     store.transitionTask(t.id, 'running', 'verifying');
-    expect(p.snapshot(4).agents.find((x) => x.key === 'pa:DEV-BE')!.status).toBe('verifying');
+    expect(p.snapshot(4).agents.find((x) => x.key === 'pa:DEV')!.status).toBe('verifying');
     store.transitionTask(t.id, 'verifying', 'publishing');
     store.transitionTask(t.id, 'publishing', 'review');
-    expect(p.snapshot(5).agents.find((x) => x.key === 'pa:DEV-BE')!.status).toBe('done');
+    expect(p.snapshot(5).agents.find((x) => x.key === 'pa:DEV')!.status).toBe('done');
   });
 
   it('renders run events as readable log lines', () => {

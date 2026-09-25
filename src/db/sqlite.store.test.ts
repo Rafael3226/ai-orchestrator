@@ -8,7 +8,7 @@ const task = (store: SqliteStore, cardId = 'c1') =>
   store.insertTask({
     id: newTaskId(),
     projectId: 'p',
-    role: 'DEV-BE',
+    role: 'DEV',
     cardId,
     cardShortId: '42',
     title: 'Do a thing',
@@ -64,7 +64,7 @@ describe('SqliteStore', () => {
       projectId: 'p',
       workspaceId: null,
       attempt: 1,
-      role: 'DEV-BE',
+      role: 'DEV',
       driver: 'local',
       model: 'opus',
     });

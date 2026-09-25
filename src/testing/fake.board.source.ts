@@ -14,6 +14,8 @@ import type {
   BoardMember,
   BoardProviderKey,
   BoardTopology,
+  CardFields,
+  NewCard,
 } from '../board/board.types.js';
 
 export interface FakeBoardOptions {
@@ -21,6 +23,12 @@ export interface FakeBoardOptions {
   readonly provider?: BoardProviderKey;
   /** Azure DevOps / Jira: labels are created on first use, and their id is the name. */
   readonly freeformLabels?: boolean;
+  /** Each defaults to true; turn one off to exercise the writer's degraded paths. */
+  readonly canCreateCard?: boolean;
+  readonly canCreateSubtask?: boolean;
+  readonly canSetFields?: boolean;
+  /** Fields setFields reports as unsupported, like Trello's priority and points. */
+  readonly unsupportedFields?: readonly (keyof CardFields)[];
 }
 
 /**
@@ -38,6 +46,13 @@ export class FakeBoardSource implements BoardSource {
   readonly cards = new Map<string, BoardCard>();
   readonly comments = new Map<string, BoardComment[]>();
   readonly events: BoardEvent[] = [];
+  /** Planning fields as the board holds them, per card id. */
+  readonly fields = new Map<string, CardFields>();
+  /** parent card id -> child card ids, in creation order. */
+  readonly children = new Map<string, string[]>();
+  /** The NewCard each created card came from, per card id. */
+  readonly created = new Map<string, NewCard>();
+  private readonly unsupportedFields: readonly (keyof CardFields)[];
   /** Who performs writeback calls; matches `botMemberId` in tests. */
   botId = 'bot';
   /** Who performs test-driven mutations. */
@@ -60,7 +75,11 @@ export class FakeBoardSource implements BoardSource {
       canAddLabel: true,
       labelsAreFreeform: opts.freeformLabels ?? false,
       canRegisterWebhook: false,
+      canCreateCard: opts.canCreateCard ?? true,
+      canCreateSubtask: opts.canCreateSubtask ?? true,
+      canSetFields: opts.canSetFields ?? true,
     };
+    this.unsupportedFields = opts.unsupportedFields ?? [];
     this.columns = columns.map((name, i) => ({ id: `list-${i}`, name, position: i }));
     this.labels = labels.map((name, i) => ({ id: `label-${i}`, name, color: null }));
     this.members = [
@@ -171,6 +190,50 @@ export class FakeBoardSource implements BoardSource {
     if (!c.memberIds.includes(memberId))
       this.patch(cardId, { memberIds: [...c.memberIds, memberId] });
     this.emit('card.assigned', cardId, this.botId, { memberId });
+  }
+  async createCard(input: NewCard): Promise<BoardCard> {
+    if (input.parentId && !this.cards.has(input.parentId)) {
+      throw new BoardError('not-found', `parent ${input.parentId} not found`, 404);
+    }
+    const shortId = `N${++this.seq}`;
+    const card: BoardCard = {
+      id: `card-${shortId}`,
+      shortId,
+      url: `https://fake/c/${shortId}`,
+      title: input.title,
+      description: input.description,
+      columnId: input.columnId ?? this.columns[0]?.id ?? '',
+      labelIds: [],
+      labelNames: [],
+      memberIds: [],
+      closed: false,
+      changedAt: this.now(),
+    };
+    this.cards.set(card.id, card);
+    this.created.set(card.id, input);
+    if (input.parentId) {
+      this.children.set(input.parentId, [...(this.children.get(input.parentId) ?? []), card.id]);
+    }
+    this.emit('card.created', card.id, this.botId, { toColumnId: card.columnId });
+    return card;
+  }
+  async setFields(cardId: string, fields: CardFields): Promise<readonly (keyof CardFields)[]> {
+    await this.getCard(cardId);
+    const unsupported = this.unsupportedFields.filter((k) => fields[k] !== undefined);
+    const kept = Object.fromEntries(
+      Object.entries(fields).filter(
+        ([k, v]) => v !== undefined && !unsupported.includes(k as keyof CardFields),
+      ),
+    ) as CardFields;
+    this.fields.set(cardId, { ...this.fields.get(cardId), ...kept });
+    this.patch(cardId, {});
+    this.emit('card.updated', cardId, this.botId, {});
+    return unsupported;
+  }
+  async listChildren(cardId: string): Promise<readonly BoardCard[]> {
+    return (this.children.get(cardId) ?? [])
+      .map((id) => this.cards.get(id))
+      .filter((c): c is BoardCard => c !== undefined);
   }
   async whoAmI(): Promise<{ id: string; username: string }> {
     return { id: this.botId, username: 'orchestrator-bot' };

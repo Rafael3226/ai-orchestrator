@@ -3,13 +3,16 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import fastifyStatic from '@fastify/static';
-import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import { z } from 'zod';
 
 import type { BoardStore } from '../board/board.store.js';
 import type { LoadedConfig } from '../config/config.loader.js';
 import type { SqliteStore } from '../db/sqlite.store.js';
 import type { RunId } from '../domain/ids.js';
 
+import { ChatError, type ChatService, MAX_MESSAGE_CHARS } from './chat.service.js';
+import type { ChatStreamEvent } from './chat.types.js';
 import { StateProjector } from './state.projection.js';
 import type { LogLine, OfficeEvent } from './state.types.js';
 
@@ -19,6 +22,28 @@ export interface ServerOptions {
   /** Built office client; served when present. */
   readonly webDist?: string;
   readonly log: (msg: string) => void;
+  /** The BA chat. Absent means the chat routes are not mounted. */
+  readonly chat?: ChatService;
+}
+
+const messageBody = z.object({ text: z.string().min(1).max(MAX_MESSAGE_CHARS) });
+
+/**
+ * The office binds to loopback, but a page on any site can still POST to
+ * 127.0.0.1 from the user's browser. A browser always sends Origin on a
+ * cross-origin POST, so: no Origin (curl, tests) is fine, a same-host Origin is
+ * fine, and a loopback Origin is fine (the Vite dev server proxies from :5173).
+ */
+export function originAllowed(origin: string | undefined, host: string | undefined): boolean {
+  if (!origin) return true;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (host && url.host === host) return true;
+  return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
 }
 
 const SNAPSHOT_TICK_MS = 1000;
@@ -125,6 +150,8 @@ export class OfficeServer {
       await new Promise(() => {});
     });
 
+    if (this.opts.chat) this.chatRoutes(this.opts.chat);
+
     if (this.opts.webDist && existsSync(this.opts.webDist)) {
       // Wildcard serving resolves files at request time, so a `pnpm web:build` with new
       // asset hashes is picked up without restarting the daemon.
@@ -148,6 +175,88 @@ export class OfficeServer {
         hint: 'office client not built — run `pnpm web:build`; API is under /api/',
       }));
     }
+  }
+
+  private chatRoutes(chat: ChatService): void {
+    const app = this.app;
+    const guard = async (req: FastifyRequest, reply: FastifyReply) => {
+      if (!originAllowed(req.headers.origin, req.headers.host)) {
+        return reply.code(403).send({ error: 'cross-origin request refused' });
+      }
+    };
+    const fail = (reply: FastifyReply, e: unknown) => {
+      if (e instanceof ChatError) return reply.code(e.status).send({ error: e.message });
+      throw e;
+    };
+
+    app.post<{ Params: { id: string } }>(
+      '/api/projects/:id/chat',
+      { preHandler: guard },
+      async (req, reply) => {
+        try {
+          return reply.code(201).send(chat.start(req.params.id));
+        } catch (e) {
+          return fail(reply, e);
+        }
+      },
+    );
+
+    app.get<{ Params: { sid: string } }>('/api/chat/:sid', async (req, reply) => {
+      try {
+        return chat.view(req.params.sid);
+      } catch (e) {
+        return fail(reply, e);
+      }
+    });
+
+    // SSE over POST (the browser reads it with fetch). The stream is opened on
+    // the first event, so a validation failure still gets a plain status code.
+    app.post<{ Params: { sid: string } }>(
+      '/api/chat/:sid/messages',
+      { preHandler: guard },
+      async (req, reply) => {
+        const body = messageBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: z.prettifyError(body.error) });
+        const abort = new AbortController();
+        let open = false;
+        const emit = (e: ChatStreamEvent) => {
+          if (!open) {
+            open = true;
+            this.sseHeaders(reply);
+            reply.raw.on('close', () => {
+              if (!reply.raw.writableEnded) abort.abort();
+            });
+          }
+          if (!reply.raw.destroyed) {
+            reply.raw.write(`event: ${e.type}
+data: ${JSON.stringify(e)}
+
+`);
+          }
+        };
+        try {
+          await chat.send(req.params.sid, body.data.text, emit, abort.signal);
+        } catch (e) {
+          if (!open) return fail(reply, e);
+          emit({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+        }
+        reply.raw.end();
+        return reply;
+      },
+    );
+
+    app.post<{ Params: { sid: string } }>(
+      '/api/chat/:sid/submit',
+      { preHandler: guard },
+      async (req, reply) => {
+        try {
+          const r = chat.submit(req.params.sid);
+          return { ...r, session: chat.view(req.params.sid) };
+        } catch (e) {
+          return fail(reply, e);
+        }
+      },
+    );
   }
 
   private sseHeaders(reply: FastifyReply): void {

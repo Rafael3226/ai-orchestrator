@@ -33,10 +33,15 @@ const allowed = [
   "grep -E 'FAIL |ERROR|not passed' full.log | head -20",
   'pnpm test > full.log 2>&1; echo exit=$?',
   'grep -n "a;b" x.ts',
+  'dotnet test EdCard.sln --no-restore',
+  'dotnet build Edcard.Api/Edcard.Api.csproj',
+  'openspec validate --strict',
 ];
 
 const denied: [string, RegExp][] = [
   ['git push origin main', /push/],
+  ['dotnet nuget push pkg.nupkg', /registry/],
+  ['dotnet tool install -g dotnet-ef', /global tool/],
   ['git commit -m "x"', /commits/],
   ['git checkout main', /commits/],
   ['git remote -v', /network git/],

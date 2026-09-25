@@ -10,21 +10,18 @@ describe('ROLE_DELIVERY', () => {
     expect(Object.keys(ROLE_DELIVERY).sort()).toEqual([...ROLES].sort());
   });
 
-  it('gives DEV-FE exactly the same contract as DEV-BE', () => {
-    // The claim behind Slice A: a second code-producing role costs a charter
-    // and a route, not pipeline code. If these ever diverge, say so on purpose.
-    expect(ROLE_DELIVERY['DEV-FE']).toEqual(ROLE_DELIVERY['DEV-BE']);
-  });
-
-  it('makes PM board-only: no git, no install, no verify, no commit', () => {
-    expect(ROLE_DELIVERY.PM).toMatchObject({
-      kind: 'board-only',
-      diff: 'forbidden',
-      verifyWith: null,
-      install: false,
-      requireCommit: false,
-    });
-  });
+  it.each(['BA', 'PM'] as const)(
+    'makes %s board-only: no git, no install, no verify, no commit',
+    (role) => {
+      expect(ROLE_DELIVERY[role]).toMatchObject({
+        kind: 'board-only',
+        diff: 'forbidden',
+        verifyWith: null,
+        install: false,
+        requireCommit: false,
+      });
+    },
+  );
 
   it('lets QA finish clean with an empty diff', () => {
     // The single field that stops "found nothing to fix" being a failure.
@@ -41,15 +38,16 @@ describe('ROLE_DELIVERY', () => {
   });
 
   it('confines only the roles that should be confined', () => {
-    expect(ROLE_DELIVERY['DEV-BE'].writeGlobs).toEqual([]);
-    expect(ROLE_DELIVERY['DEV-FE'].writeGlobs).toEqual([]);
+    expect(ROLE_DELIVERY['DEV'].writeGlobs).toEqual([]);
     expect(ROLE_DELIVERY.QA.writeGlobs.length).toBeGreaterThan(0);
     expect(ROLE_DELIVERY.DEVOPS.writeGlobs.length).toBeGreaterThan(0);
   });
 
   it('never gives write globs to a role that must not write at all', () => {
-    expect(ROLE_DELIVERY.PM.writeGlobs).toEqual([]);
-    expect(ROLE_DELIVERY.PM.diff).toBe('forbidden');
+    for (const role of ['BA', 'PM'] as const) {
+      expect(ROLE_DELIVERY[role].writeGlobs).toEqual([]);
+      expect(ROLE_DELIVERY[role].diff).toBe('forbidden');
+    }
   });
 });
 
@@ -58,12 +56,17 @@ describe('the declared globs against the real guard', () => {
   const can = (role: 'QA' | 'DEVOPS', file: string): boolean =>
     checkWrite(root, file, ROLE_DELIVERY[role].writeGlobs).ok;
 
-  it.each(['src/slugify.test.ts', 'tests/e2e/login.spec.ts', 'test/helpers.ts', 'e2e/smoke.ts'])(
-    'lets QA write %s',
-    (file) => expect(can('QA', file)).toBe(true),
-  );
+  it.each([
+    'src/slugify.test.ts',
+    'tests/e2e/login.spec.ts',
+    'test/helpers.ts',
+    'e2e/smoke.ts',
+    'e2e/tests/login.spec.ts',
+    'playwright.config.ts',
+    'Edcard.Application.Tests/Services/CardServiceTests.cs',
+  ])('lets QA write %s', (file) => expect(can('QA', file)).toBe(true));
 
-  it.each(['src/slugify.ts', 'package.json', '.github/workflows/ci.yml'])(
+  it.each(['src/slugify.ts', 'package.json', '.github/workflows/ci.yml', 'Edcard.Api/Program.cs'])(
     'stops QA writing %s',
     (file) => expect(can('QA', file)).toBe(false),
   );

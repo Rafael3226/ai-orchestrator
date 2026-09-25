@@ -341,3 +341,88 @@ describe('mapUpdate', () => {
     ).toEqual(['card.updated']);
   });
 });
+
+describe('AdoSource — agent writes', () => {
+  it('creates a child Task with a Markdown description and a parent relation', async () => {
+    const { src, calls } = source([
+      {
+        method: 'POST',
+        match: '/wit/workitems/%24Task',
+        reply: item(77, { 'System.Title': 'How to test', 'System.State': 'New' }),
+      },
+    ]);
+    const card = await src.createCard({
+      type: 'subtask',
+      title: 'How to test',
+      description: 'steps',
+      parentId: '12',
+    });
+    expect(card.id).toBe('77');
+    const call = calls.find((c) => c.method === 'POST' && c.url.includes('%24Task'));
+    expect(call?.headers['content-type']).toBe('application/json-patch+json');
+    expect(call?.body).toEqual([
+      { op: 'add', path: '/fields/System.Title', value: 'How to test' },
+      { op: 'add', path: '/fields/System.Description', value: 'steps' },
+      { op: 'add', path: '/multilineFieldsFormat/System.Description', value: 'Markdown' },
+      {
+        op: 'add',
+        path: '/relations/-',
+        value: {
+          rel: 'System.LinkTypes.Hierarchy-Reverse',
+          url: 'https://dev.azure.com/contoso/Web/_apis/wit/workItems/12',
+        },
+      },
+    ]);
+  });
+
+  it('maps a story onto User Story unless cardTypes says otherwise', async () => {
+    const { src, calls } = source([
+      { method: 'POST', match: '/wit/workitems/%24User%20Story', reply: item(78, {}) },
+    ]);
+    await src.createCard({ type: 'story', title: 'A story', description: '' });
+    expect(calls.some((c) => c.url.includes('%24User%20Story'))).toBe(true);
+  });
+
+  it('sets priority on the 1-4 scale, points and dates', async () => {
+    const { src, calls } = source([
+      { method: 'PATCH', match: '/wit/workitems/12', reply: item(12, {}) },
+    ]);
+    expect(
+      await src.setFields('12', {
+        priority: 'highest',
+        storyPoints: 8,
+        startDate: '2026-10-01',
+        dueDate: '2026-10-09',
+      }),
+    ).toEqual([]);
+    expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual([
+      { op: 'add', path: '/fields/Microsoft.VSTS.Common.Priority', value: 1 },
+      { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.StoryPoints', value: 8 },
+      { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.StartDate', value: '2026-10-01' },
+      { op: 'add', path: '/fields/Microsoft.VSTS.Scheduling.TargetDate', value: '2026-10-09' },
+    ]);
+  });
+
+  it('lists children from Hierarchy-Forward relations', async () => {
+    const { src } = source([
+      {
+        match: '/wit/workitems/12?',
+        reply: {
+          ...item(12, {}),
+          relations: [
+            {
+              rel: 'System.LinkTypes.Hierarchy-Forward',
+              url: 'https://dev.azure.com/contoso/_apis/wit/workItems/31',
+            },
+            {
+              rel: 'System.LinkTypes.Related',
+              url: 'https://dev.azure.com/contoso/_apis/wit/workItems/32',
+            },
+          ],
+        },
+      },
+      { method: 'POST', match: '/wit/workitemsbatch', reply: { value: [item(31, {})] } },
+    ]);
+    expect((await src.listChildren('12')).map((c) => c.id)).toEqual(['31']);
+  });
+});

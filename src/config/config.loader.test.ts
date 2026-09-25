@@ -19,10 +19,10 @@ projects:
       credentials: TRELLO_X
       botMemberId: m1
       columns: { ready: Ready, review: Review }
-    agents: { DEV-BE: { enabled: true } }
+    agents: { DEV: { enabled: true } }
     routes:
       - when: { list: Ready }
-        agent: DEV-BE
+        agent: DEV
 ${overrides}
 `;
 
@@ -30,11 +30,21 @@ describe('loadConfigFromString', () => {
   it('loads the shipped example and resolves agent defaults', () => {
     const loaded = loadConfigFromString(example, 'orchestrator.example.yaml');
     const p = loaded.project('ai-auto-apply');
-    expect(p.agents['DEV-BE'].enabled).toBe(true);
-    expect(p.agents['DEV-BE'].model).toBe('opus');
-    expect(p.agents['DEV-BE'].budget.maxUsd).toBe(6);
-    expect(p.agents.QA.enabled).toBe(false);
-    expect(p.agents.PM.model).toBe('haiku');
+    expect(p.agents['DEV'].enabled).toBe(true);
+    expect(p.agents['DEV'].model).toBe('opus');
+    expect(p.agents['DEV'].budget.maxUsd).toBe(8);
+    expect(p.agents['DEV'].workflowCommand).toBe('/acts-workflow-managed');
+    expect(p.agents.QA.enabled).toBe(true);
+    expect(p.agents.PM.model).toBe('sonnet');
+    expect(p.agents.PM.capabilities).toContain('set-fields');
+    expect(p.agents.QA.capabilities).not.toContain('set-fields');
+    // Homes come from the routes; the label route makes DEVOPS's home carry its label.
+    expect(p.flow.homes.DEV).toEqual({ column: 'Ready for Dev', label: null });
+    expect(p.flow.homes.QA).toEqual({ column: 'Testing', label: null });
+    expect(p.flow.homes.DEVOPS).toBeNull(); // disabled
+    // Escalation fills handTo on steps that name no destination of their own.
+    expect(p.agents.QA.writeback.onFailure.handTo).toBe('DEV');
+    expect(p.agents.DEV.writeback.onBlocked.handTo).toBe('PM');
     expect(loaded.credentialRefs.get('TRELLO_MAIN')).toEqual({
       kind: 'trello',
       projects: ['ai-auto-apply'],
@@ -95,7 +105,7 @@ describe('loadConfigFromString', () => {
   it('warns when an unconditional route shadows a later one on the same column', () => {
     const loaded = loadConfigFromString(
       minimal(`      - when: { list: Ready, label: be }
-        agent: DEV-BE`),
+        agent: DEV`),
       'x.yaml',
     );
     expect(loaded.diagnostics.map((d) => d.code)).toContain('route-shadowed');
@@ -134,10 +144,10 @@ projects:
       botMemberId: m1
       columns: { ready: Ready, review: Review }
 ${extra}
-    agents: { DEV-BE: { enabled: true } }
+    agents: { DEV: { enabled: true } }
     routes:
       - when: { list: Ready }
-        agent: DEV-BE
+        agent: DEV
 `;
 
   it('rejects webhooks on a provider that does not implement them', () => {
@@ -170,8 +180,8 @@ ${extra}
 
   it('defaults exec to the local driver', () => {
     const p = loadConfigFromString(minimal(), 'x.yaml').project('demo');
-    expect(p.agents['DEV-BE'].exec.driver).toBe('local');
-    expect(p.agents['DEV-BE'].exec.docker.image).toBe('ai-orchestrator/agent:latest');
+    expect(p.agents['DEV'].exec.driver).toBe('local');
+    expect(p.agents['DEV'].exec.docker.image).toBe('ai-orchestrator/agent:latest');
   });
 
   it('merges exec across defaults, project and role, narrowest last', () => {
@@ -190,20 +200,20 @@ projects:
       driver: docker
       docker: { memoryMb: 8192 }
     agents:
-      DEV-BE: { enabled: true }
-      DEV-FE: { enabled: true, docker: { image: fe:2 } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+      DEV: { enabled: true }
+      DEVOPS: { enabled: true, docker: { image: fe:2 } }
+    routes: [{ when: { list: Ready }, agent: DEV }]
 `;
     const p = loadConfigFromString(yaml, 'x.yaml').project('demo');
 
     // Project overrides the default driver...
-    expect(p.agents['DEV-BE'].exec.driver).toBe('docker');
+    expect(p.agents['DEV'].exec.driver).toBe('docker');
     // ...project memory wins over the default...
-    expect(p.agents['DEV-BE'].exec.docker.memoryMb).toBe(8192);
+    expect(p.agents['DEV'].exec.docker.memoryMb).toBe(8192);
     // ...the default image survives where nothing overrode it...
-    expect(p.agents['DEV-BE'].exec.docker.image).toBe('base:1');
+    expect(p.agents['DEV'].exec.docker.image).toBe('base:1');
     // ...and the role's image is narrower still, without erasing its siblings.
-    expect(p.agents['DEV-FE'].exec.docker).toMatchObject({
+    expect(p.agents['DEVOPS'].exec.docker).toMatchObject({
       image: 'fe:2',
       memoryMb: 8192,
       cpus: 1,
@@ -219,7 +229,7 @@ projects:
   it('applies priority as a stable reorder over file order', () => {
     const loaded = loadConfigFromString(
       minimal(`      - when: { list: Ready, label: be }
-        agent: DEV-BE
+        agent: DEV
         priority: 10`),
       'x.yaml',
     );
@@ -237,10 +247,10 @@ projects:
 ${board}
       botMemberId: m1
       columns: { ready: Ready, review: In Review }
-    agents: { DEV-BE: { enabled: true } }
+    agents: { DEV: { enabled: true } }
     routes:
       - when: { column: Ready }
-        agent: DEV-BE
+        agent: DEV
 ${extra}
 `;
     const ado = `      provider: azure-devops

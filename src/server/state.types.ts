@@ -94,6 +94,28 @@ export interface StateSnapshot {
   readonly runs: { readonly recent: readonly RunSummary[]; readonly active: readonly string[] };
   readonly cards: readonly CardState[];
   readonly outbox: Readonly<Record<string, number>>;
+  /** Work that stopped moving or needs a person. Newest first. */
+  readonly attention: readonly AttentionItem[];
+}
+
+export type AttentionKind =
+  | 'stale-card' // sat in one column past its threshold with nothing running
+  | 'needs-human' // a task ended needs_human / blocked / failed and nobody has moved the card since
+  | 'dead-writeback'; // an outbox op gave up — the board is out of step with what we think
+
+export interface AttentionItem {
+  readonly kind: AttentionKind;
+  readonly projectId: string;
+  readonly cardId: string;
+  readonly cardShortId: string | null;
+  readonly cardUrl: string | null;
+  readonly title: string;
+  /** One line: why this is here. */
+  readonly reason: string;
+  /** Role that last worked on it, if any. */
+  readonly role: string | null;
+  /** When it started needing attention (ISO). */
+  readonly since: string;
 }
 
 export type OfficeEvent =

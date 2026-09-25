@@ -24,10 +24,10 @@ projects:
       poll: { reconcileEveryTicks: 50 }
       webhook: { enabled: true }
       columns: { ready: Ready for Dev, inProgress: In Progress, review: In Review }
-    agents: { DEV-BE: { enabled: true } }
+    agents: { DEV: { enabled: true } }
     routes:
       - when: { list: Ready for Dev, label: be }
-        agent: DEV-BE
+        agent: DEV
     writeback:
       onStart: { move: inProgress, assign: bot, comment: started }
 `;
@@ -92,7 +92,7 @@ describe('webhook delivery through the buffer into BoardSync', () => {
 
     const first = await sync.tick();
     expect(first.dispatched).toHaveLength(1);
-    expect(first.dispatched[0]?.role).toBe('DEV-BE');
+    expect(first.dispatched[0]?.role).toBe('DEV');
     expect(ledgerRows(card.id)).toBe(1);
 
     // The poller now reports the very same action from the feed.
@@ -130,7 +130,7 @@ describe('webhook delivery through the buffer into BoardSync', () => {
     // This is why the buffer needs no table of its own.
     const r = await afterCrash.tick();
     expect(r.dispatched).toHaveLength(1);
-    expect(r.dispatched[0]?.role).toBe('DEV-BE');
+    expect(r.dispatched[0]?.role).toBe('DEV');
   });
 
   it('drops our own writeback echo without dispatching, at webhook latency', async () => {

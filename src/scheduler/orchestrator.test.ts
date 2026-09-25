@@ -112,10 +112,10 @@ projects:
       botMemberId: bot
       poll: { intervalSeconds: 5, reconcileEveryTicks: 100, reconcileOnStart: false }
       columns: { ready: Ready for Dev, inProgress: In Progress, review: In Review, blocked: Blocked }
-    agents: { DEV-BE: { enabled: true } }
+    agents: { DEV: { enabled: true } }
     routes:
       - when: { list: Ready for Dev }
-        agent: DEV-BE
+        agent: DEV
     writeback:
       onStart:   { move: inProgress, assign: bot, comment: started }
       onSuccess: { move: review, comment: report }
@@ -199,9 +199,9 @@ describe('Orchestrator end to end (fake board, fake driver, real git)', () => {
     const spec = driver.specs[0]!;
     expect(existsSync(join(spec.cwd, 'README.md'))).toBe(true);
     expect(existsSync(join(spec.cwd, 'AGENT_WAS_HERE.md'))).toBe(true);
-    expect(git(spec.cwd, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('ai/dev-be/42-add-a-thing');
+    expect(git(spec.cwd, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('ai/dev/42-add-a-thing');
     expect(spec.prompt).toContain('Please add the thing.');
-    expect(spec.systemPromptAppend).toContain('You are DEV-BE');
+    expect(spec.systemPromptAppend).toContain('You are DEV');
 
     // Writeback: onStart moved it to In Progress, onFailure moved it to Blocked, both commented.
     await writer.drain(await sync.getTopology());
@@ -240,14 +240,14 @@ projects:
         done: Done
         blocked: Blocked
     agents:
-      DEV-BE: { enabled: true }
+      DEV: { enabled: true }
       QA:
         enabled: true
         writeback:
           onSuccess: { move: done, comment: report, addLabel: qa-passed }
     routes:
       - when: { list: Ready for Dev, label: be }
-        agent: DEV-BE
+        agent: DEV
       - when: { list: In Review }
         agent: QA
     writeback:
@@ -257,7 +257,7 @@ projects:
 `;
 
 describe('role handoff end to end', () => {
-  it('DEV-BE finishing wakes QA on the same card, with no human touching the board', async () => {
+  it('DEV finishing wakes QA on the same card, with no human touching the board', async () => {
     const store = new SqliteStore(':memory:');
     const boardStore = new BoardStore(store);
     const board = new FakeBoardSource(
@@ -266,7 +266,7 @@ describe('role handoff end to end', () => {
       ['be', 'qa-passed'],
     );
 
-    // Attempt 1 is DEV-BE (writes code), attempt 2 is QA (reviews, changes nothing).
+    // Attempt 1 is DEV (writes code), attempt 2 is QA (reviews, changes nothing).
     const driver = new ScriptedDriver([
       {
         work: (cwd) => writeFileSync(join(cwd, 'thing.ts'), 'export const thing = 1;\n'),
@@ -307,7 +307,7 @@ describe('role handoff end to end', () => {
     const worktrees = new WorktreeManager(store, []);
 
     const run = async (t: (typeof store.listTasks extends () => infer R ? R : never)[number]) => {
-      const writeback = project.agents[t.role as 'DEV-BE' | 'QA'].writeback;
+      const writeback = project.agents[t.role as 'DEV' | 'QA'].writeback;
       const claimed = store.transitionTask(t.id, 'queued', 'claimed');
       return executeTask(
         {
@@ -339,8 +339,8 @@ describe('role handoff end to end', () => {
     });
     board.humanMove(card.id, 'Ready for Dev');
 
-    // 1. The human's move dispatches DEV-BE.
-    expect((await sync.tick()).dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    // 1. The human's move dispatches DEV.
+    expect((await sync.tick()).dispatched.map((d) => d.role)).toEqual(['DEV']);
     const beTask = store.listTasks({ state: 'queued' })[0]!;
     expect((await run(beTask)).verdict).toBe('review');
 
@@ -372,7 +372,7 @@ describe('role handoff end to end', () => {
 
     // Two roles, two tasks, one card, one unattended chain.
     const tasks = store.listTasks();
-    expect(tasks.map((t) => t.role).sort()).toEqual(['DEV-BE', 'QA']);
+    expect(tasks.map((t) => t.role).sort()).toEqual(['DEV', 'QA']);
     expect(tasks.every((t) => t.state === 'review')).toBe(true);
 
     // And it settles: nothing dispatches again.
@@ -406,10 +406,10 @@ projects:
       botMemberId: bot
       poll: { intervalSeconds: 5, reconcileEveryTicks: 100, reconcileOnStart: false }
       columns: { ready: Ready, inProgress: Active, blocked: Blocked }
-    agents: { DEV-BE: { enabled: true } }
+    agents: { DEV: { enabled: true } }
     routes:
       - when: { column: Ready }
-        agent: DEV-BE
+        agent: DEV
     writeback:
       onStart:   { move: inProgress, comment: started }
       onFailure: { move: blocked, comment: report, addLabel: ai-failed }

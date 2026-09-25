@@ -1,5 +1,7 @@
 import type { StateSnapshot } from '@server/state.types';
 
+import { AttentionPanel } from './attention';
+import { ChatPanel } from './chat';
 import { Drawer } from './drawer';
 import { openStateStream } from './net';
 import { fmtMs, Office } from './office';
@@ -11,6 +13,10 @@ const diag = document.getElementById('diag') as HTMLElement;
 const recent = document.getElementById('recent') as HTMLElement;
 
 const drawer = new Drawer();
+const chat = new ChatPanel();
+const attention = new AttentionPanel();
+(document.getElementById('chat-toggle') as HTMLElement).onclick = () => chat.toggle();
+(document.getElementById('attention-toggle') as HTMLElement).onclick = () => attention.toggle();
 let latest: StateSnapshot | null = null;
 
 const office = new Office(canvas, (hit) => {
@@ -22,6 +28,9 @@ openStateStream(
   (s) => {
     latest = s;
     office.update(s);
+    chat.setProjects(s.projects);
+    // Older servers do not send it; treat that as "nothing to show".
+    attention.update(s.attention ?? []);
     const busy = s.agents.filter((a) => a.run).length;
     stats.textContent = `${s.projects.length} project(s) · ${busy} agent(s) busy · ${s.cards.filter((c) => c.state === 'queued').length} queued · outbox ${JSON.stringify(s.outbox)} · rev ${s.configRevision}`;
     diag.textContent = s.diagnostics.length
@@ -50,5 +59,6 @@ openStateStream(
 );
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'f' && latest) office.fit();
+  const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
+  if (e.key === 'f' && latest && !typing) office.fit();
 });

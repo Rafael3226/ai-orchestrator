@@ -3,6 +3,7 @@ import type { LoadedConfig, ProjectConfig } from '../config/config.loader.js';
 import { ROLES, type Role } from '../config/config.schema.js';
 import type { RunEventRow, RunRow, SqliteStore, TaskRow } from '../db/sqlite.store.js';
 import type { RunId } from '../domain/ids.js';
+import { StaleWatch } from '../scheduler/stale.watch.js';
 
 import type { AgentState, AgentStatus, LogLine, RunSummary, StateSnapshot } from './state.types.js';
 
@@ -15,9 +16,9 @@ const LIVE_TASK_STATES = ['claimed', 'preparing', 'running', 'verifying', 'publi
 
 /** Desk positions per role inside a room, in room-local pixels. Two per row. */
 const DESKS: Readonly<Record<Role, { x: number; y: number }>> = {
-  PM: { x: 96, y: 120 },
-  'DEV-BE': { x: 288, y: 120 },
-  'DEV-FE': { x: 480, y: 120 },
+  BA: { x: 96, y: 120 },
+  PM: { x: 288, y: 120 },
+  DEV: { x: 480, y: 120 },
   QA: { x: 192, y: 260 },
   DEVOPS: { x: 384, y: 260 },
 };
@@ -27,11 +28,16 @@ const DESKS: Readonly<Record<Role, { x: number; y: number }>> = {
  * client, so the office stays a pure function of state.
  */
 export class StateProjector {
+  private readonly stale: StaleWatch;
+
   constructor(
     private readonly loaded: LoadedConfig,
     private readonly store: SqliteStore,
     private readonly boardStore: BoardStore,
-  ) {}
+  ) {
+    // Read-only use: the daemon's instance does the checking; this one only queries.
+    this.stale = new StaleWatch(store, boardStore, { info: () => {}, warn: () => {} });
+  }
 
   snapshot(eventId: number): StateSnapshot {
     const now = Date.now();
@@ -116,6 +122,7 @@ export class StateProjector {
           updatedAt: t.updated_at,
         })),
       outbox: this.boardStore.outboxCounts(),
+      attention: this.stale.attention(cfg.projects.filter((p) => p.enabled)),
     };
   }
 

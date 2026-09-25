@@ -22,6 +22,10 @@ export interface UserPromptInput {
   readonly verifyCommand: string | null;
   /** Present on the retry attempt. */
   readonly previousFailure?: { command: string; exitCode: number | null; outputTail: string };
+  /** The target repo's workflow command, already expanded (see workflow.command.ts). */
+  readonly workflow?: string;
+  /** Planning context for PM: what else the team has in flight. */
+  readonly inFlight?: readonly string[];
 }
 
 export function buildUserPrompt(input: UserPromptInput): string {
@@ -41,8 +45,16 @@ export function buildUserPrompt(input: UserPromptInput): string {
     `Branch: ${task.branch}`,
     `Base: ${input.baseRef}`,
     `Attempt: ${task.attempt} of ${task.maxAttempts}`,
-    `Budget: ${input.budget.maxTurns} turns, $${input.budget.maxUsd.toFixed(2)}, ${input.budget.wallClockMinutes} minutes wall clock`,
+    `Budget: ${input.budget.maxTurns} turns, ${input.budget.maxUsd.toFixed(2)}, ${input.budget.wallClockMinutes} minutes wall clock`,
+    task.today ? `Today: ${task.today}` : '',
   ];
+
+  if (input.inFlight?.length) {
+    lines.push('', '## Work already in flight', ...input.inFlight.map((l) => `- ${l}`));
+  }
+  // Only on the first attempt: the retry keeps its context, and re-sending a
+  // long workflow would just burn the budget.
+  if (input.workflow && !input.previousFailure) lines.push('', input.workflow);
 
   if (input.previousFailure) {
     lines.push(

@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+import { PRIORITIES, WORK_ITEM_TYPES } from '../board/board.types.js';
+import { HAND_TARGETS } from '../config/config.schema.js';
+
 export const PHASES = [
   'exploring',
   'planning',
@@ -90,8 +93,55 @@ export const proposeSummaryShape = {
   commit: conventionalCommitSchema.optional(),
   /** QA. */
   findings: z.array(findingSchema).max(30).optional(),
-  /** PM. */
+  /** PM / BA. */
   acceptanceCriteria: z.array(z.string().min(5).max(300)).max(20).optional(),
+  /**
+   * DEV. Required for DEV: whether QA has anything to test. `testable: true`
+   * also requires a QA sub-task created with create_work_item.
+   */
+  testability: z
+    .object({
+      testable: z.boolean(),
+      reason: z.string().min(10).max(1000),
+    })
+    .optional(),
+} as const;
+
+const isoDate = z.string().regex(/^d{4}-d{2}-d{2}$/, 'YYYY-MM-DD');
+
+export const createWorkItemShape = {
+  type: z.enum(WORK_ITEM_TYPES),
+  title: z.string().min(5).max(200),
+  description: z.string().min(20).max(12_000),
+  acceptanceCriteria: z.array(z.string().min(5).max(300)).max(20).optional(),
+  /** `current` = the card this run works on. Required for `subtask`. */
+  parent: z.string().min(1).max(64).optional(),
+  /** Who picks it up. Omit to use the project's default for the type. */
+  assignTo: z.enum([...HAND_TARGETS, 'none']).optional(),
+} as const;
+
+export const reassignShape = {
+  to: z.enum(HAND_TARGETS),
+  reason: z.string().min(10).max(2000),
+} as const;
+
+/** Fibonacci only: points are relative size, and the gaps are the point. */
+export const STORY_POINTS = [1, 2, 3, 5, 8, 13, 21] as const;
+
+export const setFieldsShape = {
+  priority: z.enum(PRIORITIES).optional(),
+  storyPoints: z
+    .number()
+    .int()
+    .refine((n) => (STORY_POINTS as readonly number[]).includes(n), 'use 1, 2, 3, 5, 8, 13 or 21')
+    .optional(),
+  startDate: isoDate.optional(),
+  dueDate: isoDate.optional(),
+  rationale: z.string().min(20).max(2000),
+} as const;
+
+export const addCommentShape = {
+  body: z.string().min(5).max(8000),
 } as const;
 
 export type ProgressReport = z.infer<z.ZodObject<typeof reportProgressShape>>;
@@ -100,4 +150,7 @@ export type Decision = z.infer<z.ZodObject<typeof recordDecisionShape>>;
 export type ProposedSummary = z.infer<z.ZodObject<typeof proposeSummaryShape>>;
 export type ConventionalCommit = z.infer<typeof conventionalCommitSchema>;
 export type Finding = z.infer<typeof findingSchema>;
+export type CreateWorkItemArgs = z.infer<z.ZodObject<typeof createWorkItemShape>>;
+export type ReassignArgs = z.infer<z.ZodObject<typeof reassignShape>>;
+export type SetFieldsArgs = z.infer<z.ZodObject<typeof setFieldsShape>>;
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];

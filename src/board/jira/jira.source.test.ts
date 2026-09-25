@@ -352,3 +352,97 @@ describe('jira mapper', () => {
     expect(jqlString('say "hi"')).toBe('"say \\"hi\\""');
   });
 });
+
+describe('JiraSource — agent writes', () => {
+  it('creates a sub-task under its parent with an ADF description, then reads it back', async () => {
+    const { src, calls } = source([
+      { method: 'POST', match: /\/issue$/, reply: { id: '2001', key: 'SHOP-9' } },
+      { match: '/issue/2001', reply: issue('2001', 'SHOP-9', { summary: 'How to test' }) },
+    ]);
+    const card = await src.createCard({
+      type: 'subtask',
+      title: 'How to test',
+      description: 'Run **it**',
+      parentId: 'SHOP-1',
+    });
+    expect(card.shortId).toBe('SHOP-9');
+    const body = calls.find((c) => c.method === 'POST')?.body as {
+      fields: Record<string, unknown>;
+    };
+    expect(body.fields['project']).toEqual({ key: 'SHOP' });
+    expect(body.fields['issuetype']).toEqual({ name: 'Sub-task' });
+    expect(body.fields['parent']).toEqual({ key: 'SHOP-1' });
+    expect((body.fields['description'] as { type: string }).type).toBe('doc');
+  });
+
+  it('honours cardTypes and a numeric parent id', async () => {
+    const stub = stubFetch([
+      statuses,
+      { method: 'POST', match: /\/issue$/, reply: { id: '2002', key: 'SHOP-10' } },
+      { match: '/issue/2002', reply: issue('2002', 'SHOP-10') },
+    ]);
+    const src = new JiraSource('acme/SHOP', { ...BOARD, cardTypes: { subtask: 'Subtask' } }, CRED, {
+      fetchImpl: stub.fetch,
+    });
+    await src.createCard({ type: 'subtask', title: 'x', description: '', parentId: '1001' });
+    const body = stub.calls.find((c) => c.method === 'POST')?.body as {
+      fields: Record<string, unknown>;
+    };
+    expect(body.fields['issuetype']).toEqual({ name: 'Subtask' });
+    expect(body.fields['parent']).toEqual({ id: '1001' });
+  });
+
+  it('sets planning fields with the default ids in one PUT', async () => {
+    const { src, calls } = source([
+      { method: 'PUT', match: '/issue/SHOP-1', reply: { status: 204 } },
+    ]);
+    const missing = await src.setFields('SHOP-1', {
+      priority: 'high',
+      storyPoints: 5,
+      startDate: '2026-10-01',
+      dueDate: '2026-10-08',
+    });
+    expect(missing).toEqual([]);
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({
+      fields: {
+        priority: { name: 'High' },
+        customfield_10016: 5,
+        customfield_10015: '2026-10-01',
+        duedate: '2026-10-08',
+      },
+    });
+  });
+
+  it('drops a field Jira rejects and keeps the rest', async () => {
+    const { src, calls } = source([
+      {
+        method: 'PUT',
+        match: '/issue/SHOP-1',
+        once: true,
+        reply: {
+          status: 400,
+          body: { errorMessages: [], errors: { customfield_10015: 'Field cannot be set.' } },
+        },
+      },
+      { method: 'PUT', match: '/issue/SHOP-1', reply: { status: 204 } },
+    ]);
+    const missing = await src.setFields('SHOP-1', { storyPoints: 3, startDate: '2026-10-01' });
+    expect(missing).toEqual(['startDate']);
+    const puts = calls.filter((c) => c.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(puts[1]?.body).toEqual({ fields: { customfield_10016: 3 } });
+  });
+
+  it('lists children with a parent JQL', async () => {
+    const { src, calls } = source([
+      {
+        method: 'POST',
+        match: '/search/jql',
+        reply: { issues: [issue('3001', 'SHOP-11')], isLast: true },
+      },
+    ]);
+    const kids = await src.listChildren('SHOP-1');
+    expect(kids.map((k) => k.shortId)).toEqual(['SHOP-11']);
+    expect((calls.at(-1)?.body as { jql: string }).jql).toContain('parent = "SHOP-1"');
+  });
+});

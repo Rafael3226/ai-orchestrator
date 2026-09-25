@@ -16,8 +16,8 @@ projects:
       test: pnpm test
       infra: pnpm run ci:validate
     board: { provider: trello, boardId: b1, credentials: TRELLO_X, columns: { ready: Ready } }
-    agents: { DEV-BE: { enabled: true } }
-    routes: [{ when: { list: Ready }, agent: DEV-BE }]
+    agents: { DEV: { enabled: true } }
+    routes: [{ when: { list: Ready }, agent: DEV }]
 `;
 
 const project = loadConfigFromString(yaml, 'x').project('demo');
@@ -32,7 +32,7 @@ describe('buildSystemAppend', () => {
   it('tells a board-only role that the summary is the deliverable', () => {
     const pm = append('PM');
     expect(pm).toContain('no commit, no branch and no pull request');
-    expect(pm).toContain('IS the deliverable');
+    expect(pm).toContain('posted to the work item verbatim');
     expect(pm).toContain('Do not create, edit or delete files');
   });
 
@@ -58,13 +58,12 @@ describe('buildSystemAppend', () => {
     expect(append('QA')).toContain('**/*.test.*');
   });
 
-  it('leaves the unconfined DEV roles without a write allowlist', () => {
-    expect(append('DEV-BE')).not.toContain('You may write ONLY these paths');
-    expect(append('DEV-FE')).not.toContain('You may write ONLY these paths');
+  it('leaves DEV without a write allowlist', () => {
+    expect(append('DEV')).not.toContain('You may write ONLY these paths');
   });
 
-  it('keeps the DEV-BE contract: commit message, verify, no push', () => {
-    const be = append('DEV-BE');
+  it('keeps the DEV contract: commit message, verify, no push', () => {
+    const be = append('DEV');
     expect(be).toContain('You MUST NOT commit, push, or open a pull request');
     expect(be).toContain('pnpm test');
     expect(be).toContain('commitlint');
@@ -72,7 +71,7 @@ describe('buildSystemAppend', () => {
 
   it('gives DEVOPS its own verification command when the project declares one', () => {
     expect(append('DEVOPS')).toContain('pnpm run ci:validate');
-    expect(append('DEV-BE')).toContain('pnpm test');
+    expect(append('DEV')).toContain('pnpm test');
   });
 
   it('numbers the board protocol contiguously whether or not there is a verify step', () => {

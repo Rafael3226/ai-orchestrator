@@ -24,6 +24,16 @@ export interface RawWorkItem {
   readonly id: number;
   readonly rev: number;
   readonly fields: Readonly<Record<string, unknown>>;
+  /** Only with `$expand=relations`. */
+  readonly relations?: readonly { readonly rel: string; readonly url: string }[];
+}
+
+/** Child ids from a work item's `Hierarchy-Forward` relations. */
+export function childIds(w: RawWorkItem): number[] {
+  return (w.relations ?? [])
+    .filter((r) => r.rel === 'System.LinkTypes.Hierarchy-Forward')
+    .map((r) => Number(/\/workItems\/(\d+)$/i.exec(r.url)?.[1]))
+    .filter((n) => Number.isInteger(n) && n > 0);
 }
 
 export interface RawFieldChange {

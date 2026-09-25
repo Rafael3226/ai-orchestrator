@@ -7,7 +7,13 @@ import {
   type RegisteredWebhook,
   type WebhookRegistrar,
 } from '../board.source.js';
-import type { BoardCard, BoardComment, BoardTopology } from '../board.types.js';
+import type {
+  BoardCard,
+  BoardComment,
+  BoardTopology,
+  CardFields,
+  NewCard,
+} from '../board.types.js';
 
 import { TrelloHttp } from './trello.http.js';
 import {
@@ -42,6 +48,11 @@ export class TrelloSource implements BoardSource, WebhookRegistrar {
     canAddLabel: true,
     labelsAreFreeform: false,
     canRegisterWebhook: true,
+    canCreateCard: true,
+    // No parent/child cards: the writer posts a sub-task on its parent as a comment.
+    canCreateSubtask: false,
+    // Only start and due are native; priority and points stay in the report.
+    canSetFields: true,
   };
   private readonly http: TrelloHttp;
   private readonly cred: TrelloCredential;
@@ -153,6 +164,33 @@ export class TrelloSource implements BoardSource, WebhookRegistrar {
       throw e;
     }
   }
+  async createCard(card: NewCard): Promise<BoardCard> {
+    if (!card.columnId) {
+      throw new BoardError('permission', 'a Trello card must be created in a list');
+    }
+    const c = await this.http.post<RawCard>('/cards', {
+      idList: card.columnId,
+      name: card.title,
+      desc: card.description.slice(0, 16_000),
+    });
+    return mapCard(c, this.labelsById);
+  }
+
+  async setFields(cardId: string, fields: CardFields): Promise<readonly (keyof CardFields)[]> {
+    const query: Record<string, string> = {};
+    if (fields.startDate) query['start'] = new Date(fields.startDate).toISOString();
+    if (fields.dueDate) query['due'] = new Date(fields.dueDate).toISOString();
+    if (Object.keys(query).length) await this.http.put(`/cards/${cardId}`, query);
+    const unsupported: (keyof CardFields)[] = [];
+    if (fields.priority) unsupported.push('priority');
+    if (fields.storyPoints !== undefined) unsupported.push('storyPoints');
+    return unsupported;
+  }
+
+  async listChildren(): Promise<readonly BoardCard[]> {
+    return [];
+  }
+
   async whoAmI(): Promise<{ id: string; username: string }> {
     return this.http.get<{ id: string; username: string }>('/members/me', {
       fields: 'id,username',

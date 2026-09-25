@@ -6,12 +6,22 @@ import {
   type BoardPollResult,
   type BoardSource,
 } from '../board.source.js';
-import type { BoardCard, BoardComment, BoardEvent, BoardTopology } from '../board.types.js';
+import type {
+  BoardCard,
+  BoardComment,
+  BoardEvent,
+  BoardTopology,
+  CardFields,
+  NewCard,
+  Priority,
+  WorkItemType,
+} from '../board.types.js';
 import { RateLimiter } from '../http/rate.limiter.js';
 import { basicAuth, RestClient } from '../http/rest.client.js';
 
 import {
   CARD_FIELDS,
+  childIds,
   mapComment,
   mapUpdate,
   mapWorkItem,
@@ -34,6 +44,31 @@ const BATCH = 200;
 const OVERLAP_MS = 2 * 60_000;
 /** Most updates we read back per changed work item on one poll. */
 const UPDATES_WINDOW = 30;
+
+/** Agile process names. Scrum calls a story `Product Backlog Item`: set `board.cardTypes`. */
+const DEFAULT_TYPES: Readonly<Record<WorkItemType, string>> = {
+  story: 'User Story',
+  bug: 'Bug',
+  task: 'Task',
+  subtask: 'Task',
+  epic: 'Epic',
+};
+
+/** ADO priority is 1 (highest) to 4 (lowest), and 2 is the process default. */
+const PRIORITY_VALUES: Readonly<Record<Priority, number>> = {
+  highest: 1,
+  high: 2,
+  medium: 2,
+  low: 3,
+  lowest: 4,
+};
+
+const DEFAULT_FIELDS = {
+  priority: 'Microsoft.VSTS.Common.Priority',
+  storyPoints: 'Microsoft.VSTS.Scheduling.StoryPoints',
+  startDate: 'Microsoft.VSTS.Scheduling.StartDate',
+  dueDate: 'Microsoft.VSTS.Scheduling.TargetDate',
+} as const;
 
 /**
  * Azure DevOps throttles by a sliding usage budget rather than a fixed request
@@ -72,6 +107,9 @@ export class AdoSource implements BoardSource {
     canAddLabel: true,
     labelsAreFreeform: true,
     canRegisterWebhook: false,
+    canCreateCard: true,
+    canCreateSubtask: true,
+    canSetFields: true,
   };
   private readonly http: RestClient;
   private readonly root: string;
@@ -87,7 +125,8 @@ export class AdoSource implements BoardSource {
     private readonly board: Pick<
       AdoBoardConfig,
       'organization' | 'project' | 'workItemTypes' | 'areaPath'
-    >,
+    > &
+      Partial<Pick<AdoBoardConfig, 'fields' | 'cardTypes'>>,
     cred: AzureDevOpsCredential,
     private readonly opts: AdoSourceOptions = {},
   ) {
@@ -234,6 +273,71 @@ export class AdoSource implements BoardSource {
     await this.patch(cardId, [
       { op: 'add', path: '/fields/System.AssignedTo', value: await this.uniqueName(memberId) },
     ]);
+  }
+
+  async createCard(card: NewCard): Promise<BoardCard> {
+    await this.ensureStates();
+    const type = this.board.cardTypes?.[card.type] ?? DEFAULT_TYPES[card.type];
+    const ops: unknown[] = [
+      { op: 'add', path: '/fields/System.Title', value: card.title },
+      { op: 'add', path: '/fields/System.Description', value: card.description },
+      { op: 'add', path: '/multilineFieldsFormat/System.Description', value: 'Markdown' },
+    ];
+    if (this.board.areaPath) {
+      ops.push({ op: 'add', path: '/fields/System.AreaPath', value: this.board.areaPath });
+    }
+    if (card.parentId) {
+      ops.push({
+        op: 'add',
+        path: '/relations/-',
+        value: {
+          rel: 'System.LinkTypes.Hierarchy-Reverse',
+          url:
+            `https://dev.azure.com/${encodeURIComponent(this.board.organization)}/` +
+            `${encodeURIComponent(this.board.project)}/_apis/wit/workItems/${Number(card.parentId)}`,
+        },
+      });
+    }
+    // ADO creates in the type's initial state; the writer moves it after.
+    const w = await this.http.post<RawWorkItem>(
+      `${this.root}/wit/workitems/${encodeURIComponent('$' + type)}`,
+      {
+        query: { 'api-version': API },
+        body: ops,
+        contentType: 'application/json-patch+json',
+      },
+    );
+    return mapWorkItem(w, this.mapContext());
+  }
+
+  async setFields(cardId: string, fields: CardFields): Promise<readonly (keyof CardFields)[]> {
+    const o = this.board.fields ?? {};
+    const ids: Record<keyof CardFields, string> = {
+      priority: o.priority ?? DEFAULT_FIELDS.priority,
+      storyPoints: o.storyPoints ?? DEFAULT_FIELDS.storyPoints,
+      startDate: o.startDate ?? DEFAULT_FIELDS.startDate,
+      dueDate: o.dueDate ?? DEFAULT_FIELDS.dueDate,
+    };
+    const ops: unknown[] = [];
+    const add = (key: keyof CardFields, value: unknown): void => {
+      ops.push({ op: 'add', path: `/fields/${ids[key]}`, value });
+    };
+    if (fields.priority) add('priority', PRIORITY_VALUES[fields.priority]);
+    if (fields.storyPoints !== undefined) add('storyPoints', fields.storyPoints);
+    if (fields.startDate) add('startDate', fields.startDate);
+    if (fields.dueDate) add('dueDate', fields.dueDate);
+    if (ops.length) await this.patch(cardId, ops);
+    return [];
+  }
+
+  async listChildren(cardId: string): Promise<readonly BoardCard[]> {
+    await this.ensureStates();
+    const w = await this.http.get<RawWorkItem>(`${this.root}/wit/workitems/${Number(cardId)}`, {
+      query: { $expand: 'relations', 'api-version': API },
+    });
+    const ids = childIds(w);
+    if (ids.length === 0) return [];
+    return (await this.batch(ids)).map((c) => mapWorkItem(c, this.mapContext()));
   }
 
   async whoAmI(): Promise<{ id: string; username: string }> {

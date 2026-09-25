@@ -21,12 +21,13 @@ export interface DeliveryPolicy {
   readonly writeGlobs: readonly string[];
 }
 
-const DEV: DeliveryPolicy = {
-  kind: 'pull-request',
-  diff: 'required',
-  verifyWith: 'test',
-  install: true,
-  requireCommit: true,
+/** A role whose deliverable is the board itself: a story, an estimate. */
+const BOARD_ONLY: DeliveryPolicy = {
+  kind: 'board-only',
+  diff: 'forbidden',
+  verifyWith: null,
+  install: false,
+  requireCommit: false,
   writeGlobs: [],
 };
 
@@ -35,19 +36,25 @@ const DEV: DeliveryPolicy = {
  *
  * Before this existed the pipeline hardcoded a code-producing outcome in four
  * places, so a PM that wrote a perfect spec and a QA that found nothing to fix
- * both ended as `failed` with `nothing-to-commit`. The three interesting rows:
+ * both ended as `failed` with `nothing-to-commit`. The interesting rows:
  *
- * - **PM** is `board-only`: no install, no verify, no branch, no PR. The body of
- *   its `propose_summary` IS the deliverable.
+ * - **BA** and **PM** are `board-only`: no install, no verify, no branch, no PR.
+ *   What they produce lands on the board — stories, estimates, decisions.
  * - **QA** is `diff: 'optional'`: wrote tests → an ordinary draft PR; found only
  *   issues → no commit and no PR, with the findings posted to the card. That one
  *   field is the whole mechanism.
- * - **DEV-FE** is deep-equal to DEV-BE. A second code-producing role costs
- *   config and a charter, not code — `delivery.policy.test.ts` pins that.
  */
 export const ROLE_DELIVERY: Readonly<Record<Role, DeliveryPolicy>> = {
-  'DEV-BE': DEV,
-  'DEV-FE': DEV,
+  BA: BOARD_ONLY,
+  PM: BOARD_ONLY,
+  DEV: {
+    kind: 'pull-request',
+    diff: 'required',
+    verifyWith: 'test',
+    install: true,
+    requireCommit: true,
+    writeGlobs: [],
+  },
   DEVOPS: {
     kind: 'pull-request',
     diff: 'required',
@@ -83,19 +90,15 @@ export const ROLE_DELIVERY: Readonly<Record<Role, DeliveryPolicy>> = {
     writeGlobs: [
       '**/*.test.*',
       '**/*.spec.*',
+      '**/*.e2e.*',
+      '**/*Tests/**',
+      '**/*.Tests/**',
       'test/**',
       'tests/**',
       'e2e/**',
       '__tests__/**',
+      'playwright.config.*',
       'docs/qa/**',
     ],
-  },
-  PM: {
-    kind: 'board-only',
-    diff: 'forbidden',
-    verifyWith: null,
-    install: false,
-    requireCommit: false,
-    writeGlobs: [],
   },
 };

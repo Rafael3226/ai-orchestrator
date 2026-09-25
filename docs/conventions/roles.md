@@ -1,17 +1,32 @@
 # Roles
 
-Five roles share one pipeline. What differs between them is declared once, in
-`src/policy/delivery.policy.ts`, and everything downstream reads it.
+Five roles share one pipeline, in flow order **BA → PM → DEV → QA**, with DEVOPS
+beside DEV. What differs between them is declared once, in
+`src/policy/delivery.policy.ts`, and everything downstream reads it. How work
+moves between them — handoff, escalation, created work, stale cards — is in
+`docs/flow.md`.
 
 | Role   | Outcome      | Empty diff  | Verifies with     | Installs | Commit | May write                  |
 | ------ | ------------ | ----------- | ----------------- | -------- | ------ | -------------------------- |
-| DEV-BE | pull request | failure     | `checks.test`     | yes      | yes    | anywhere in the worktree   |
-| DEV-FE | pull request | failure     | `checks.test`     | yes      | yes    | anywhere in the worktree   |
-| DEVOPS | pull request | failure     | `checks.infra` \* | yes      | yes    | CI, Docker, infra, scripts |
-| QA     | pull request | **success** | `checks.test`     | yes      | yes    | tests only                 |
+| BA     | board only   | n/a         | nothing           | **no**   | **no** | nothing                    |
 | PM     | board only   | n/a         | nothing           | **no**   | **no** | nothing                    |
+| DEV    | pull request | failure     | `checks.test`     | yes      | yes    | anywhere in the worktree   |
+| QA     | pull request | **success** | `checks.test`     | yes      | yes    | tests only                 |
+| DEVOPS | pull request | failure     | `checks.infra` \* | yes      | yes    | CI, Docker, infra, scripts |
 
 \* falls back to `checks.test` when the project declares no `infra` check.
+
+What each role owes beyond the table:
+
+- **BA** — INVEST stories with Given/When/Then acceptance criteria; every
+  business decision recorded with `record_decision` and posted on the card.
+- **PM** — `set_fields` with priority, Fibonacci story points and start/due
+  dates, each justified. Its prompt carries today's date and the work in flight.
+- **DEV** — follows the target repo's workflow command, then sets `testability`
+  in its summary; `testable: true` is rejected until it has created a QA
+  sub-task with how-to-test steps.
+- **QA** — one automated suite per sub-task, Playwright or API end-to-end
+  preferred; defects become bugs and the card is reassigned to DEV.
 
 ## Why this table exists
 
@@ -23,19 +38,20 @@ So a PM that wrote a perfect specification, and a QA that reviewed a branch and
 correctly found nothing to change, both ended up marked **failed**. The delivery
 policy is what makes those outcomes representable.
 
-## The three interesting rows
-
-**DEV-FE is deep-equal to DEV-BE.** A second code-producing role costs a charter
-and a route, not pipeline code. `delivery.policy.test.ts` asserts the equality, so
-if they ever diverge it is on purpose.
+## The interesting rows
 
 **QA is adaptive** (`diff: 'optional'`). Wrote a missing test → an ordinary draft
 PR. Reviewed and found only issues → no commit, no branch push, no PR; the
 findings go on the card and the verdict is still `review`.
 
-**PM never touches git** (`kind: 'board-only'`). No `pnpm install`, no verify, no
-branch diff, no PR. The body of its `propose_summary` _is_ the deliverable and is
-posted to the card verbatim, along with `acceptanceCriteria` as a checklist.
+**BA and PM never touch git** (`kind: 'board-only'`). No install, no verify, no
+branch diff, no PR. The body of their `propose_summary` is posted to the card
+verbatim, with `acceptanceCriteria` as a checklist, their decisions, and the
+board changes they requested.
+
+**QA writes tests, so it has the write tools.** Before v1.0 its tool policy
+denied Edit/Write while its delivery policy allowed test paths; the guard's
+`writeGlobs` is now the only confinement, as it is for DEVOPS.
 
 ## Write confinement
 
@@ -85,8 +101,8 @@ matches the `ux_one_active_task_per_card` index.
 
 ## Not in scope
 
-- **PM creating cards.** It refines the card it was given. Creating new ones needs
-  a `propose_cards` tool, a `create-card` outbox op and `BoardSource.createCard`.
+- **Agents writing to the board mid-run.** Board tools record requests; the
+  outbox applies them after the run (see `docs/flow.md`).
 - **DEVOPS running infrastructure.** `docker`, `terraform` and `kubectl` stay
   denied by `bash.guard.ts`. DEVOPS edits configuration and explains the rollout.
 - **Per-project delivery overrides.** `ROLE_DELIVERY` is code, not YAML. A project

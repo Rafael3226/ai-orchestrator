@@ -22,8 +22,8 @@ projects:
       poll: { reconcileEveryTicks: 3 }
       columns: { ready: Ready for Dev, inProgress: In Progress, review: In Review, blocked: Blocked }
     agents:
-      DEV-BE: { enabled: true }
-      DEV-FE: { enabled: false }
+      DEV: { enabled: true }
+      DEVOPS: { enabled: false }
       QA:
         enabled: true
         # QA is routed on In Review, so its own success must not move the card
@@ -32,9 +32,9 @@ projects:
           onSuccess: { comment: report }
     routes:
       - when: { list: Ready for Dev, label: be }
-        agent: DEV-BE
+        agent: DEV
       - when: { list: Ready for Dev, label: fe }
-        agent: DEV-FE
+        agent: DEVOPS
       - when: { list: In Review }
         agent: QA
     writeback:
@@ -74,7 +74,7 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     );
     // A brand-new store with no cursor: reconcile picks up the parked card exactly once.
     const r = await fresh.tick();
-    expect(r.dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    expect(r.dispatched.map((d) => d.role)).toEqual(['DEV']);
   });
 
   it('dispatches exactly once when a labeled card is moved into Ready for Dev', async () => {
@@ -82,7 +82,7 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     board.humanMove(c.id, 'Ready for Dev');
     const r = await sync.tick();
     expect(r.dispatched).toHaveLength(1);
-    expect(r.dispatched[0]?.role).toBe('DEV-BE');
+    expect(r.dispatched[0]?.role).toBe('DEV');
     expect(store.listTasks({ state: 'queued' })).toHaveLength(1);
     // Nothing new → nothing dispatched.
     expect((await sync.tick()).dispatched).toHaveLength(0);
@@ -92,7 +92,7 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     const c = board.addCard('7', 'Frontend-less', 'Ready for Dev');
     expect((await sync.tick()).dispatched).toHaveLength(0);
     board.humanLabel(c.id, 'be');
-    expect((await sync.tick()).dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    expect((await sync.tick()).dispatched.map((d) => d.role)).toEqual(['DEV']);
   });
 
   it('never dispatches on description edits or comments', async () => {
@@ -109,7 +109,7 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     board.addCard('9', 'UI thing', 'Ready for Dev', { labels: ['fe'] });
     const r = await sync.tick();
     expect(r.dispatched).toHaveLength(0);
-    expect(r.skipped.some((s) => /DEV-FE is disabled/.test(s.reason))).toBe(true);
+    expect(r.skipped.some((s) => /DEVOPS is disabled/.test(s.reason))).toBe(true);
   });
 
   it('re-dispatches when a card leaves the column and comes back (arrivalSeq)', async () => {
@@ -154,7 +154,7 @@ describe('BoardSync + BoardRouter with a fake board', () => {
     const c = board.addCard('20', 'Moved by the same account', 'Backlog', { labels: ['be'] });
     board.humanMove(c.id, 'Ready for Dev');
     const r = await sync.tick();
-    expect(r.dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    expect(r.dispatched.map((d) => d.role)).toEqual(['DEV']);
   });
 
   it('writeback comment is idempotent on redelivery', async () => {
@@ -183,7 +183,7 @@ describe('handoff: one role waking the next', () => {
   it('dispatches QA on our own move, where a plain poll would call it an echo', async () => {
     const c = board.addCard('20', 'Handoff me', 'Ready for Dev', { labels: ['be'] });
     const first = await sync.tick();
-    expect(first.dispatched.map((d) => d.role)).toEqual(['DEV-BE']);
+    expect(first.dispatched.map((d) => d.role)).toEqual(['DEV']);
     const task = store.listTasks()[0]!;
     // The runner lands the task before its writeback is ever enqueued, so the
     // one-active-task-per-card index is satisfied by the time we hand off.
@@ -196,7 +196,7 @@ describe('handoff: one role waking the next', () => {
     });
     writer.enqueueStep(
       'onSuccess',
-      project.agents['DEV-BE'].writeback.onSuccess,
+      project.agents['DEV'].writeback.onSuccess,
       task.id,
       c.id,
       'done report',
@@ -210,7 +210,7 @@ describe('handoff: one role waking the next', () => {
     expect(dispatch?.role).toBe('QA');
 
     const roles = store.listTasks().map((t) => t.role);
-    expect(roles.sort()).toEqual(['DEV-BE', 'QA']);
+    expect(roles.sort()).toEqual(['DEV', 'QA']);
   });
 
   it('is idempotent — a second handoff for the same card dispatches nothing', async () => {
@@ -221,7 +221,7 @@ describe('handoff: one role waking the next', () => {
     const writer = new BoardWriter(project, board, boardStore, sync.router, quiet);
     writer.enqueueStep(
       'onSuccess',
-      project.agents['DEV-BE'].writeback.onSuccess,
+      project.agents['DEV'].writeback.onSuccess,
       store.listTasks()[0]!.id,
       c.id,
       'done',
@@ -241,7 +241,7 @@ describe('handoff: one role waking the next', () => {
     const writer = new BoardWriter(project, board, boardStore, sync.router, quiet);
     writer.enqueueStep(
       'onSuccess',
-      project.agents['DEV-BE'].writeback.onSuccess,
+      project.agents['DEV'].writeback.onSuccess,
       store.listTasks()[0]!.id,
       c.id,
       'done',
@@ -271,7 +271,7 @@ describe('circuit breaker scoping', () => {
     const taskId = store.insertTask({
       id: newTaskId(),
       projectId: 'demo',
-      role: 'DEV-BE',
+      role: 'DEV',
       cardId: c.id,
       cardShortId: c.shortId,
       title: c.title,
@@ -282,15 +282,15 @@ describe('circuit breaker scoping', () => {
         dedupeKey: `k-${i}`,
         projectId: 'demo',
         cardId: c.id,
-        role: 'DEV-BE',
+        role: 'DEV',
         routeId: 'demo/route-0',
         taskId,
       });
     }
 
     const hour = 60 * 60_000;
-    expect(boardStore.recentDispatchCount('demo', c.id, hour, 'DEV-BE')).toBe(4);
-    // QA is unaffected by DEV-BE burning through its budget.
+    expect(boardStore.recentDispatchCount('demo', c.id, hour, 'DEV')).toBe(4);
+    // QA is unaffected by DEV burning through its budget.
     expect(boardStore.recentDispatchCount('demo', c.id, hour, 'QA')).toBe(0);
     // Unscoped still counts everything, for callers that want the total.
     expect(boardStore.recentDispatchCount('demo', c.id, hour)).toBe(4);

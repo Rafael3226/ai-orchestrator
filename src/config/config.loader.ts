@@ -10,7 +10,10 @@ import type { DriverKind } from '../exec/exec.driver.js';
 import {
   type AgentSettings,
   type Budget,
+  type Capability,
   type DockerConfig,
+  type FlowConfigRaw,
+  type HandTarget,
   orchestratorConfigSchema,
   type OrchestratorConfigRaw,
   type ProjectConfigRaw,
@@ -21,13 +24,36 @@ import {
 } from './config.schema.js';
 import type { CredentialKind, CredentialUse } from './credentials.js';
 
+const EVERYONE: Capability[] = ['create-work-item', 'reassign', 'comment'];
+
 /** Hard-coded floor so a project can omit `defaults.agents` entirely. */
 const BUILTIN_AGENT_DEFAULTS: Record<Role, AgentSettings> = {
-  'DEV-BE': { model: 'opus', budget: { maxUsd: 6, maxTurns: 120, wallClockMinutes: 30 } },
-  'DEV-FE': { model: 'opus', budget: { maxUsd: 6, maxTurns: 120, wallClockMinutes: 30 } },
-  QA: { model: 'sonnet', budget: { maxUsd: 1.5, maxTurns: 60, wallClockMinutes: 20 } },
-  PM: { model: 'haiku', budget: { maxUsd: 0.5, maxTurns: 20, wallClockMinutes: 10 } },
-  DEVOPS: { model: 'sonnet', budget: { maxUsd: 2, maxTurns: 60, wallClockMinutes: 20 } },
+  BA: {
+    model: 'sonnet',
+    budget: { maxUsd: 1.5, maxTurns: 40, wallClockMinutes: 15 },
+    capabilities: EVERYONE,
+  },
+  PM: {
+    model: 'sonnet',
+    budget: { maxUsd: 1, maxTurns: 30, wallClockMinutes: 10 },
+    capabilities: [...EVERYONE, 'set-fields'],
+  },
+  DEV: {
+    model: 'opus',
+    budget: { maxUsd: 8, maxTurns: 150, wallClockMinutes: 45 },
+    capabilities: EVERYONE,
+    workflowCommand: '/acts-workflow-managed',
+  },
+  QA: {
+    model: 'sonnet',
+    budget: { maxUsd: 3, maxTurns: 100, wallClockMinutes: 30 },
+    capabilities: EVERYONE,
+  },
+  DEVOPS: {
+    model: 'sonnet',
+    budget: { maxUsd: 2, maxTurns: 60, wallClockMinutes: 20 },
+    capabilities: EVERYONE,
+  },
 };
 
 export interface ResolvedAgent extends AgentSettings {
@@ -51,10 +77,22 @@ export interface ResolvedRoute extends Omit<RouteConfig, 'when'> {
   readonly when: Omit<RouteConfig['when'], 'list'>;
 }
 
-export interface ProjectConfig extends Omit<ProjectConfigRaw, 'agents' | 'routes' | 'pr'> {
+/** Where a role picks work up: the column (and label, if any) of its first enabled column route. */
+export interface HomeColumn {
+  readonly column: string;
+  readonly label: string | null;
+}
+
+export interface ResolvedFlow extends FlowConfigRaw {
+  /** null when the role has no column route, or is disabled. */
+  readonly homes: Readonly<Record<Role, HomeColumn | null>>;
+}
+
+export interface ProjectConfig extends Omit<ProjectConfigRaw, 'agents' | 'routes' | 'pr' | 'flow'> {
   readonly agents: Readonly<Record<Role, ResolvedAgent>>;
   readonly routes: readonly ResolvedRoute[];
   readonly pr: OrchestratorConfigRaw['defaults']['pr'];
+  readonly flow: ResolvedFlow;
 }
 
 export interface OrchestratorConfig extends Omit<OrchestratorConfigRaw, 'projects'> {
@@ -63,7 +101,11 @@ export interface OrchestratorConfig extends Omit<OrchestratorConfigRaw, 'project
 
 export interface ConfigDiagnostic {
   readonly level: 'warn';
-  readonly code: 'route-to-disabled-agent' | 'route-shadowed' | 'webhook-redundant-polling';
+  readonly code:
+    | 'route-to-disabled-agent'
+    | 'route-shadowed'
+    | 'webhook-redundant-polling'
+    | 'flow-no-closed-column';
   readonly projectId?: string;
   readonly message: string;
 }
@@ -204,9 +246,12 @@ function normalizeProject(
   let moves = false;
   const checkSteps = (
     where: string,
-    steps: Record<string, { move?: string | undefined } | undefined>,
+    steps: Record<string, { move?: string | undefined; handTo?: string | undefined } | undefined>,
   ): void => {
     for (const [stepName, step] of Object.entries(steps)) {
+      if (step?.handTo !== undefined && step.move !== undefined) {
+        errors.push(`projects.${p.id}.${where}.${stepName}: set \`move\` or \`handTo\`, not both`);
+      }
       if (step?.move === undefined) continue;
       moves = true;
       if (!aliases.has(step.move)) {
@@ -242,6 +287,22 @@ function normalizeProject(
     }
   }
 
+  // handTo resolves through the flow, so it is checked after the homes exist.
+  const flow: ResolvedFlow = { ...p.flow, homes: resolveHomes(agents, routes) };
+  const ctx: FlowCheck = { p, flow, agents, errors };
+  checkFlowAliases(p, errors);
+  checkFlowTargets(ctx);
+  if (checkHandSteps(ctx)) moves = true;
+  if (Object.keys(p.flow.newItems).length) moves = true;
+  if (Object.keys(p.flow.escalation).length && p.flow.stale.enabled && !p.flow.closed) {
+    diagnostics.push({
+      level: 'warn',
+      code: 'flow-no-closed-column',
+      projectId: p.id,
+      message: 'flow.closed is not set, so the stale watch also flags finished cards',
+    });
+  }
+
   checkLabelNames(p, errors);
 
   if (moves && !p.board.botMemberId) {
@@ -252,7 +313,106 @@ function normalizeProject(
 
   // Per-project `pr` is a partial overlay; drop undefined so it cannot erase a default.
   const pr = { ...root.defaults.pr, ...stripUndefined(p.pr ?? {}) };
-  return { ...p, agents, routes, pr };
+  return { ...p, agents, routes, pr, flow };
+}
+
+/** What the flow checks share. */
+interface FlowCheck {
+  readonly p: ProjectConfigRaw;
+  readonly flow: ResolvedFlow;
+  readonly agents: Record<Role, ResolvedAgent>;
+  readonly errors: string[];
+}
+
+/**
+ * A role's home column is derived from its routes, so a handoff lands exactly
+ * where the router will pick the card up again — no second table to drift.
+ */
+function resolveHomes(
+  agents: Record<Role, ResolvedAgent>,
+  routes: readonly ResolvedRoute[],
+): Record<Role, HomeColumn | null> {
+  const homeOf = (role: Role): HomeColumn | null => {
+    if (!agents[role].enabled) return null;
+    const r = routes.find((x) => x.agent === role && x.enabled && x.when.column !== undefined);
+    if (!r?.when.column) return null;
+    return {
+      column: r.when.column,
+      label: firstLabel(r.when.label) ?? r.when.labelsAll?.[0] ?? null,
+    };
+  };
+  return Object.fromEntries(ROLES.map((role) => [role, homeOf(role)])) as Record<
+    Role,
+    HomeColumn | null
+  >;
+}
+
+function checkFlowAliases(p: ProjectConfigRaw, errors: string[]): void {
+  const aliases = new Set(Object.keys(p.board.columns));
+  const named = [
+    ...(['intake', 'closed', 'humanColumn', 'untestableTo'] as const).map(
+      (key) => [`flow.${key}`, p.flow[key]] as const,
+    ),
+    ...Object.keys(p.flow.stale.columns).map((a) => [`flow.stale.columns.${a}`, a] as const),
+  ];
+  for (const [where, alias] of named) {
+    if (alias !== undefined && !aliases.has(alias)) {
+      errors.push(`projects.${p.id}.${where}: "${alias}" is not declared under board.columns`);
+    }
+  }
+}
+
+function checkFlowTargets(ctx: FlowCheck): void {
+  for (const [type, target] of Object.entries(ctx.p.flow.newItems)) {
+    if (target !== undefined && target !== 'none') {
+      checkHandTarget(ctx, target, `flow.newItems.${type}`);
+    }
+  }
+  for (const [role, esc] of Object.entries(ctx.p.flow.escalation)) {
+    for (const [when, target] of Object.entries(esc ?? {})) {
+      if (target !== undefined) checkHandTarget(ctx, target, `flow.escalation.${role}.${when}`);
+    }
+  }
+}
+
+/** Every resolved writeback `handTo`. Returns whether any step hands a card on. */
+function checkHandSteps(ctx: FlowCheck): boolean {
+  let any = false;
+  for (const role of ROLES) {
+    if (!ctx.agents[role].enabled) continue;
+    for (const [stepName, step] of Object.entries(ctx.agents[role].writeback)) {
+      if (step.handTo === undefined) continue;
+      any = true;
+      const where = `agents.${role}.writeback.${stepName}.handTo`;
+      checkHandTarget(ctx, step.handTo, where);
+      if (step.handTo === role) {
+        ctx.errors.push(
+          `projects.${ctx.p.id}.${where}: ${role} hands the card back to itself — that is a dispatch loop`,
+        );
+      }
+    }
+  }
+  return any;
+}
+
+function checkHandTarget(ctx: FlowCheck, target: HandTarget, where: string): void {
+  const problem = handTargetProblem(ctx, target);
+  if (problem) ctx.errors.push(`projects.${ctx.p.id}.${where}: ${problem}`);
+}
+
+function handTargetProblem(ctx: FlowCheck, target: HandTarget): string | null {
+  if (target === 'human') {
+    return ctx.p.flow.humanColumn === undefined ? '"human" needs flow.humanColumn' : null;
+  }
+  if (!ctx.agents[target].enabled) return `${target} is not enabled for this project`;
+  return ctx.flow.homes[target]
+    ? null
+    : `${target} has no column route, so there is nowhere to hand the card`;
+}
+
+function firstLabel(v: string | string[] | undefined): string | null {
+  if (v === undefined) return null;
+  return Array.isArray(v) ? (v[0] ?? null) : v;
 }
 
 /**
@@ -334,11 +494,26 @@ function resolveAgent(role: Role, root: OrchestratorConfigRaw, p: ProjectConfigR
   const local: Partial<AgentOverride> = p.agents[role] ?? {};
   const exec = resolveExec(root, p, local);
   const overlay = local.writeback ?? {};
+  // `flow.escalation` decides where a failed/blocked card goes. It beats the
+  // project-wide default step's destination (that is the point of it), but a
+  // role's own writeback overlay that names a destination beats escalation.
+  const escalation = p.flow.escalation[role] ?? {};
+  const escalate = (
+    own: WritebackStep | undefined,
+    fallback: WritebackStep,
+    to: HandTarget | undefined,
+  ): WritebackStep => {
+    if (own && (own.move !== undefined || own.handTo !== undefined)) return own;
+    const step = own ?? fallback;
+    if (to === undefined) return step;
+    const { move: _move, ...rest } = step;
+    return { ...rest, handTo: to };
+  };
   const writeback = {
     onStart: overlay.onStart ?? p.writeback.onStart,
     onSuccess: overlay.onSuccess ?? p.writeback.onSuccess,
-    onFailure: overlay.onFailure ?? p.writeback.onFailure,
-    onBlocked: overlay.onBlocked ?? p.writeback.onBlocked,
+    onFailure: escalate(overlay.onFailure, p.writeback.onFailure, escalation.onFailure),
+    onBlocked: escalate(overlay.onBlocked, p.writeback.onBlocked, escalation.onBlocked),
   };
   const budget: Budget = {
     ...builtin.budget,
@@ -347,13 +522,17 @@ function resolveAgent(role: Role, root: OrchestratorConfigRaw, p: ProjectConfigR
   };
   const systemPromptFile =
     local.systemPromptFile ?? global.systemPromptFile ?? builtin.systemPromptFile;
+  // `false` at any level switches the builtin workflow command off.
+  const workflow = local.workflowCommand ?? global.workflowCommand ?? builtin.workflowCommand;
   return {
     enabled: local.enabled ?? false,
     model: local.model ?? global.model ?? builtin.model,
     budget,
     writeback,
     exec,
+    capabilities: [...(local.capabilities ?? global.capabilities ?? builtin.capabilities)],
     ...(systemPromptFile !== undefined ? { systemPromptFile } : {}),
+    ...(typeof workflow === 'string' ? { workflowCommand: workflow } : {}),
   };
 }
 

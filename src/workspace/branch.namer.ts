@@ -26,7 +26,7 @@ export function renderBranchName(input: BranchNameInput): string {
     .replace('{slug}', slugify(input.cardTitle));
 }
 
-/** `ai/dev-be/142-add-pagination`, then `-2`, `-3` … on collision. */
+/** `ai/dev/142-add-pagination`, then `-2`, `-3` … on collision. */
 export function withCollisionSuffix(base: string, exists: (candidate: string) => boolean): string {
   if (!exists(base)) return base;
   for (let n = 2; n < 100; n++) {

@@ -6,6 +6,8 @@ import type {
   BoardEvent,
   BoardProviderKey,
   BoardTopology,
+  CardFields,
+  NewCard,
 } from './board.types.js';
 
 export interface BufferStats {
@@ -153,6 +155,18 @@ export class WebhookBufferedSource implements BoardSource {
 
   assignMember(cardId: string, memberId: string): Promise<void> {
     return this.inner.assignMember(cardId, memberId);
+  }
+
+  createCard(card: NewCard): Promise<BoardCard> {
+    return this.inner.createCard(card);
+  }
+
+  setFields(cardId: string, fields: CardFields): Promise<readonly (keyof CardFields)[]> {
+    return this.inner.setFields(cardId, fields);
+  }
+
+  listChildren(cardId: string): Promise<readonly BoardCard[]> {
+    return this.inner.listChildren(cardId);
   }
 
   whoAmI(): Promise<{ id: string; username: string }> {

@@ -1,10 +1,11 @@
 # AI Orchestrator
 
 A board-driven AI dev team. Cards on a Trello, Azure DevOps or Jira board
-dispatch role agents (DEV-FE, DEV-BE, QA, PM, DEVOPS); each agent runs Claude
+dispatch role agents (BA, PM, DEV, QA, DEVOPS — see docs/flow.md); each agent runs Claude
 Code headlessly in its own git worktree, the orchestrator verifies the result,
 pushes a branch, opens a draft PR (GitHub or Azure Repos) and reports back on
-the card. A read-only 2D office shows who is working on what. Setting up each
+the card. A 2D office shows who is working on what and what needs attention,
+and hosts the BA chat where new stories start. Setting up each
 board and repo host is in `docs/providers.md`.
 
 > **Status:** phases 0–4 done; phase 5 (all five roles, webhook delivery, the

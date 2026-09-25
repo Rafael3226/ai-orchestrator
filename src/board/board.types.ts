@@ -102,3 +102,34 @@ export function findLabelByName(topology: BoardTopology, name: string): BoardLab
   const target = name.trim().toLocaleLowerCase();
   return topology.labels.find((l) => l.name.trim().toLocaleLowerCase() === target);
 }
+
+/** What an agent may create. Each provider maps these onto its own type names. */
+export const WORK_ITEM_TYPES = ['story', 'bug', 'task', 'subtask', 'epic'] as const;
+export type WorkItemType = (typeof WORK_ITEM_TYPES)[number];
+
+export const PRIORITIES = ['highest', 'high', 'medium', 'low', 'lowest'] as const;
+export type Priority = (typeof PRIORITIES)[number];
+
+export interface NewCard {
+  readonly type: WorkItemType;
+  readonly title: string;
+  /** Markdown; each provider converts it (ADF for Jira, Markdown field format for ADO). */
+  readonly description: string;
+  /** Provider card id of the parent. Required for `subtask`. */
+  readonly parentId?: string;
+  /**
+   * Where the card should land. Trello needs it at creation; Jira and ADO
+   * create in the workflow's initial state and the writer moves it after.
+   */
+  readonly columnId?: string;
+}
+
+/** Planning fields PM sets. Absent means "leave it alone". */
+export interface CardFields {
+  readonly priority?: Priority;
+  readonly storyPoints?: number;
+  /** `YYYY-MM-DD`. */
+  readonly startDate?: string;
+  /** `YYYY-MM-DD`. */
+  readonly dueDate?: string;
+}
